@@ -308,6 +308,123 @@ struct PhotoDetailView: View {
     }
 }
 
+// MARK: - Expanded Photo Grid View (Full Screen, No Sheet)
+struct ExpandedPhotoGridView: View {
+    let photos: [MediaItem]
+    let onClose: () -> Void
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
+
+    var body: some View {
+        ScrollView(showsIndicators: false) {
+            LazyVStack(spacing: 0) {
+                // Header spacer pour la safe area
+                Color.clear.frame(height: 100)
+
+                // Grille de photos
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(photos) { photo in
+                        ExpandedGridCell(asset: photo.asset)
+                            .aspectRatio(1, contentMode: .fill)
+                            .clipped()
+                    }
+                }
+                .padding(.horizontal, 2)
+
+                // Bottom padding
+                Color.clear.frame(height: 50)
+            }
+        }
+        .background(Color(.systemBackground))
+        .overlay(alignment: .top) {
+            // Header avec bouton fermer
+            expandedHeader
+        }
+    }
+
+    private var expandedHeader: some View {
+        HStack {
+            Button(action: onClose) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.down")
+                        .font(.body.weight(.semibold))
+                    Text("Fermer")
+                        .font(.body.weight(.medium))
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+            }
+
+            Spacer()
+
+            Text("\(photos.count) photos")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.trailing, 16)
+        }
+        .padding(.leading, 16)
+        .padding(.top, 60)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(.systemBackground),
+                    Color(.systemBackground).opacity(0.9),
+                    Color(.systemBackground).opacity(0)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 120)
+            .ignoresSafeArea(edges: .top)
+        )
+    }
+}
+
+// MARK: - Expanded Grid Cell (Optimized for large collections)
+struct ExpandedGridCell: View {
+    let asset: PHAsset
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image = image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle()
+                    .fill(Color(.systemGray6))
+            }
+        }
+        .task(id: asset.localIdentifier) {
+            image = await loadThumbnail()
+        }
+    }
+
+    private func loadThumbnail() async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .highQualityFormat
+            options.isNetworkAccessAllowed = false
+            options.resizeMode = .fast
+
+            let targetSize = CGSize(width: 150, height: 150)
+
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: targetSize,
+                contentMode: .aspectFill,
+                options: options
+            ) { image, _ in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+}
+
 // MARK: - Preview
 #Preview {
     PhotoLibraryView()

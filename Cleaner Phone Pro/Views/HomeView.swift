@@ -11,49 +11,30 @@ import Photos
 struct HomeView: View {
     @StateObject private var viewModel = CleanerViewModel()
     @State private var showPermissionAlert = false
-    @State private var showPhotoLibrary = false
+    @State private var isPhotoLibraryExpanded = false
     @State private var showRefreshSuccess = false
     @State private var isRefreshing = false
 
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
-                // Main ScrollView avec Pull to Refresh
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 0) {
-                        // Hero Section avec Mosaïque edge-to-edge
-                        heroSection
+                if isPhotoLibraryExpanded {
+                    // Vue photos étendue
+                    expandedPhotoLibrary
+                        .transition(.move(edge: .bottom))
+                } else {
+                    // Vue normale
+                    normalView
+                }
 
-                        // Content
-                        VStack(spacing: 16) {
-                            // Main Content
-                            if viewModel.isScanning && !isRefreshing {
-                                scanningSection
-                                    .padding(.top, 20)
-                            } else if viewModel.hasCompletedScan {
-                                cleanupSection
-                            } else if !viewModel.isScanning {
-                                startSection
-                                    .padding(.top, 20)
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 40)
-                    }
-                }
-                .refreshable {
-                    await performRefresh()
-                }
-                .ignoresSafeArea(edges: .top)
+                // Floating Header avec blur
+                floatingHeader
 
                 // Success indicator
                 if showRefreshSuccess {
                     refreshSuccessIndicator
                         .transition(.opacity.combined(with: .scale))
                 }
-
-                // Floating Header avec blur
-                floatingHeader
             }
             .background(Color(.systemGroupedBackground))
             .navigationBarHidden(true)
@@ -73,12 +54,50 @@ struct HomeView: View {
             .navigationDestination(for: CleanupCategory.self) { category in
                 destinationView(for: category)
             }
-            .sheet(isPresented: $showPhotoLibrary) {
-                PhotoLibraryView()
-                    .environmentObject(viewModel)
-            }
         }
         .environmentObject(viewModel)
+    }
+
+    // MARK: - Normal View
+    private var normalView: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: 0) {
+                // Hero Section avec Mosaïque edge-to-edge
+                heroSection
+
+                // Content
+                VStack(spacing: 16) {
+                    if viewModel.isScanning && !isRefreshing {
+                        scanningSection
+                            .padding(.top, 20)
+                    } else if viewModel.hasCompletedScan {
+                        cleanupSection
+                    } else if !viewModel.isScanning {
+                        startSection
+                            .padding(.top, 20)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 40)
+            }
+        }
+        .refreshable {
+            await performRefresh()
+        }
+        .ignoresSafeArea(edges: .top)
+    }
+
+    // MARK: - Expanded Photo Library
+    private var expandedPhotoLibrary: some View {
+        ExpandedPhotoGridView(
+            photos: viewModel.allPhotos,
+            onClose: {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    isPhotoLibraryExpanded = false
+                }
+            }
+        )
+        .ignoresSafeArea(edges: .top)
     }
 
     // MARK: - Floating Header
@@ -124,7 +143,9 @@ struct HomeView: View {
                 photos: viewModel.allPhotos,
                 height: 380
             ) {
-                showPhotoLibrary = true
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        isPhotoLibraryExpanded = true
+                    }
             }
             .clipShape(Rectangle()) // Pas de rounded corners en haut
 
@@ -154,7 +175,9 @@ struct HomeView: View {
                     Spacer()
 
                     Button {
-                        showPhotoLibrary = true
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        isPhotoLibraryExpanded = true
+                    }
                     } label: {
                         Text("Voir tout")
                             .font(.subheadline)
