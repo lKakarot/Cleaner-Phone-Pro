@@ -30,7 +30,9 @@ class PhotoLibraryService: ObservableObject {
     }
 
     func fetchAllPhotos() async {
-        guard authorizationStatus == .authorized || authorizationStatus == .limited else {
+        // Vérifier le statut actuel (pas le cache)
+        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard currentStatus == .authorized || currentStatus == .limited else {
             return
         }
 
@@ -51,7 +53,9 @@ class PhotoLibraryService: ObservableObject {
     }
 
     func fetchPhotosOnly() async -> [MediaItem] {
-        guard authorizationStatus == .authorized || authorizationStatus == .limited else {
+        // Vérifier le statut actuel (pas le cache)
+        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard currentStatus == .authorized || currentStatus == .limited else {
             return []
         }
 
@@ -70,7 +74,9 @@ class PhotoLibraryService: ObservableObject {
     }
 
     func fetchVideosOnly() async -> [MediaItem] {
-        guard authorizationStatus == .authorized || authorizationStatus == .limited else {
+        // Vérifier le statut actuel (pas le cache)
+        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard currentStatus == .authorized || currentStatus == .limited else {
             return []
         }
 

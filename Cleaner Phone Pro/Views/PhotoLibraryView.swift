@@ -12,25 +12,34 @@ struct PhotoLibraryView: View {
     @EnvironmentObject var viewModel: CleanerViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var selectedPhoto: MediaItem? = nil
-    @State private var columnCount: Int = 4
-
-    private var groupedPhotos: [PhotoSection] {
-        groupPhotosByMonth(viewModel.allPhotos)
-    }
+    @State private var groupedPhotos: [PhotoSection] = []
+    @State private var isLoading = true
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(spacing: 20, pinnedViews: [.sectionHeaders]) {
-                    ForEach(groupedPhotos) { section in
-                        Section {
-                            photoGrid(for: section.photos)
-                        } header: {
-                            sectionHeader(for: section)
+            Group {
+                if isLoading {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                        Text("Chargement...")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 20, pinnedViews: [.sectionHeaders]) {
+                            ForEach(groupedPhotos) { section in
+                                Section {
+                                    photoGrid(for: section.photos)
+                                } header: {
+                                    sectionHeader(for: section)
+                                }
+                            }
                         }
+                        .padding(.horizontal, 2)
                     }
                 }
-                .padding(.horizontal, 2)
             }
             .background(Color(.systemBackground))
             .navigationTitle("Bibliothèque")
@@ -41,36 +50,25 @@ struct PhotoLibraryView: View {
                         dismiss()
                     }
                 }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button {
-                            withAnimation { columnCount = 3 }
-                        } label: {
-                            Label("Grande", systemImage: columnCount == 3 ? "checkmark" : "")
-                        }
-
-                        Button {
-                            withAnimation { columnCount = 4 }
-                        } label: {
-                            Label("Moyenne", systemImage: columnCount == 4 ? "checkmark" : "")
-                        }
-
-                        Button {
-                            withAnimation { columnCount = 5 }
-                        } label: {
-                            Label("Petite", systemImage: columnCount == 5 ? "checkmark" : "")
-                        }
-                    } label: {
-                        Image(systemName: "square.grid.3x3")
-                            .font(.body)
-                    }
-                }
             }
             .sheet(item: $selectedPhoto) { photo in
                 PhotoDetailView(photo: photo)
             }
+            .task {
+                await loadPhotos()
+            }
         }
+    }
+
+    private func loadPhotos() async {
+        // Faire le groupement en background
+        let photos = viewModel.allPhotos
+        let sections = await Task.detached(priority: .userInitiated) {
+            PhotoLibraryView.groupPhotosByMonth(photos)
+        }.value
+
+        groupedPhotos = sections
+        isLoading = false
     }
 
     // MARK: - Section Header
@@ -98,7 +96,7 @@ struct PhotoLibraryView: View {
 
     // MARK: - Photo Grid
     private func photoGrid(for photos: [MediaItem]) -> some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: columnCount)
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
 
         return LazyVGrid(columns: columns, spacing: 2) {
             ForEach(photos) { photo in
@@ -117,7 +115,7 @@ struct PhotoLibraryView: View {
     }
 
     // MARK: - Group Photos by Month
-    private func groupPhotosByMonth(_ photos: [MediaItem]) -> [PhotoSection] {
+    private static func groupPhotosByMonth(_ photos: [MediaItem]) -> [PhotoSection] {
         let calendar = Calendar.current
         let now = Date()
 
@@ -232,22 +230,19 @@ struct PhotoGridCell: View {
     private func loadThumbnail() async -> UIImage? {
         await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
-            options.deliveryMode = .opportunistic
-            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .highQualityFormat
+            options.isNetworkAccessAllowed = false
+            options.resizeMode = .fast
 
-            let scale = UIScreen.main.scale
-            let targetSize = CGSize(width: 150 * scale, height: 150 * scale)
+            let targetSize = CGSize(width: 100, height: 100)
 
             PHImageManager.default().requestImage(
                 for: asset,
                 targetSize: targetSize,
                 contentMode: .aspectFill,
                 options: options
-            ) { image, info in
-                let isDegraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if !isDegraded || self.image == nil {
-                    continuation.resume(returning: image)
-                }
+            ) { image, _ in
+                continuation.resume(returning: image)
             }
         }
     }
