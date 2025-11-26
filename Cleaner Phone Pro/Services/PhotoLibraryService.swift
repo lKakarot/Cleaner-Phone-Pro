@@ -3,107 +3,102 @@
 //  Cleaner Phone Pro
 //
 
-import Foundation
 import Photos
 import UIKit
 
-@MainActor
 class PhotoLibraryService: ObservableObject {
     @Published var authorizationStatus: PHAuthorizationStatus = .notDetermined
-    @Published var allPhotos: [MediaItem] = []
-    @Published var isLoading = false
-
+    
     static let shared = PhotoLibraryService()
-
-    private init() {
-        checkAuthorizationStatus()
-    }
-
-    func checkAuthorizationStatus() {
-        authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-    }
-
-    func requestAuthorization() async -> Bool {
+    
+    private let imageManager = PHCachingImageManager()
+    private let thumbnailSize = CGSize(width: 300, height: 300)
+    
+    func requestAuthorization() async -> PHAuthorizationStatus {
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
-        authorizationStatus = status
-        return status == .authorized || status == .limited
+        await MainActor.run {
+            self.authorizationStatus = status
+        }
+        return status
+    }
+    
+    func fetchScreenshots() async -> [MediaItem] {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(
+            format: "(mediaSubtype & %d) != 0",
+            PHAssetMediaSubtype.photoScreenshot.rawValue
+        )
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
+
+        let assets = PHAsset.fetchAssets(with: .image, options: options)
+        return await fetchMediaItems(from: assets)
+    }
+    
+    func fetchLargeVideos(minSizeMB: Int64 = 10) async -> [MediaItem] {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
+
+        let assets = PHAsset.fetchAssets(with: .video, options: options)
+        var items = await fetchMediaItems(from: assets)
+
+        let minSizeBytes = minSizeMB * 1024 * 1024
+        items = items.filter { $0.fileSize >= minSizeBytes }
+
+        return items.sorted { $0.fileSize > $1.fileSize }
+    }
+    
+    func fetchAllPhotos() async -> [MediaItem] {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(
+            format: "(mediaSubtype & %d) == 0",
+            PHAssetMediaSubtype.photoScreenshot.rawValue
+        )
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
+
+        let assets = PHAsset.fetchAssets(with: .image, options: options)
+        return await fetchMediaItems(from: assets)
     }
 
-    func fetchAllPhotos() async {
-        // Vérifier le statut actuel (pas le cache)
-        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard currentStatus == .authorized || currentStatus == .limited else {
-            return
-        }
+    func fetchAllVideos() async -> [MediaItem] {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
 
-        isLoading = true
-
-        let fetchOptions = PHFetchOptions()
-        fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-
-        let assets = PHAsset.fetchAssets(with: fetchOptions)
+        let assets = PHAsset.fetchAssets(with: .video, options: options)
+        return await fetchMediaItems(from: assets)
+    }
+    
+    private func fetchMediaItems(from fetchResult: PHFetchResult<PHAsset>) async -> [MediaItem] {
         var items: [MediaItem] = []
-
-        assets.enumerateObjects { asset, _, _ in
+        
+        fetchResult.enumerateObjects { asset, _, _ in
             items.append(MediaItem(asset: asset))
         }
-
-        allPhotos = items
-        isLoading = false
+        
+        var itemsWithData: [MediaItem] = []
+        for var item in items {
+            item.thumbnail = await self.loadThumbnail(for: item.asset)
+            item.fileSize = self.getFileSize(for: item.asset)
+            itemsWithData.append(item)
+        }
+        
+        return itemsWithData
     }
-
-    func fetchPhotosOnly() async -> [MediaItem] {
-        // Vérifier le statut actuel (pas le cache)
-        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard currentStatus == .authorized || currentStatus == .limited else {
-            return []
-        }
-
-        let fetchOptions = PHFetchOptions()
-        fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        fetchOptions.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-
-        let assets = PHAsset.fetchAssets(with: fetchOptions)
-        var items: [MediaItem] = []
-
-        assets.enumerateObjects { asset, _, _ in
-            items.append(MediaItem(asset: asset))
-        }
-
-        return items
-    }
-
-    func fetchVideosOnly() async -> [MediaItem] {
-        // Vérifier le statut actuel (pas le cache)
-        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard currentStatus == .authorized || currentStatus == .limited else {
-            return []
-        }
-
-        let fetchOptions = PHFetchOptions()
-        fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        fetchOptions.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.video.rawValue)
-
-        let assets = PHAsset.fetchAssets(with: fetchOptions)
-        var items: [MediaItem] = []
-
-        assets.enumerateObjects { asset, _, _ in
-            items.append(MediaItem(asset: asset))
-        }
-
-        return items
-    }
-
-    func loadImage(for asset: PHAsset, targetSize: CGSize) async -> UIImage? {
+    
+    func loadThumbnail(for asset: PHAsset) async -> UIImage? {
         await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
-            options.deliveryMode = .highQualityFormat
-            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .fastFormat
+            options.resizeMode = .fast
             options.isSynchronous = false
+            options.isNetworkAccessAllowed = true
 
-            PHImageManager.default().requestImage(
+            imageManager.requestImage(
                 for: asset,
-                targetSize: targetSize,
+                targetSize: thumbnailSize,
                 contentMode: .aspectFill,
                 options: options
             ) { image, _ in
@@ -112,43 +107,39 @@ class PhotoLibraryService: ObservableObject {
         }
     }
 
-    func loadFullImage(for asset: PHAsset) async -> UIImage? {
-        await withCheckedContinuation { continuation in
-            let options = PHImageRequestOptions()
-            options.deliveryMode = .highQualityFormat
-            options.isNetworkAccessAllowed = true
-            options.isSynchronous = false
+    func getFileSize(for asset: PHAsset) -> Int64 {
+        let resources = PHAssetResource.assetResources(for: asset)
 
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: PHImageManagerMaximumSize,
-                contentMode: .aspectFit,
-                options: options
-            ) { image, _ in
-                continuation.resume(returning: image)
+        // Try to get original resource first, then any available resource
+        let targetTypes: [PHAssetResourceType] = [
+            .video,
+            .fullSizeVideo,
+            .photo,
+            .fullSizePhoto,
+            .adjustmentBaseVideo,
+            .adjustmentBasePhoto
+        ]
+
+        for targetType in targetTypes {
+            if let resource = resources.first(where: { $0.type == targetType }),
+               let fileSize = resource.value(forKey: "fileSize") as? Int64,
+               fileSize > 0 {
+                return fileSize
             }
         }
-    }
 
-    func deleteAssets(_ assets: [PHAsset]) async -> Bool {
-        await withCheckedContinuation { continuation in
-            PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.deleteAssets(assets as NSFastEnumeration)
-            } completionHandler: { success, error in
-                if let error = error {
-                    print("Error deleting assets: \(error.localizedDescription)")
-                }
-                continuation.resume(returning: success)
-            }
+        // Fallback to first resource
+        if let resource = resources.first,
+           let fileSize = resource.value(forKey: "fileSize") as? Int64 {
+            return fileSize
         }
-    }
 
-    func getStorageInfo() -> (used: Int64, total: Int64) {
-        guard let attributes = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
-              let totalSize = attributes[.systemSize] as? Int64,
-              let freeSize = attributes[.systemFreeSize] as? Int64 else {
-            return (0, 0)
+        // Estimate size for videos based on duration (rough estimate: 10MB per minute for HD)
+        if asset.mediaType == .video {
+            let estimatedBytesPerSecond: Double = 170_000 // ~10MB/min
+            return Int64(asset.duration * estimatedBytesPerSecond)
         }
-        return (totalSize - freeSize, totalSize)
+
+        return 0
     }
 }
