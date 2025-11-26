@@ -11,7 +11,6 @@ import Photos
 struct HomeView: View {
     @StateObject private var viewModel = CleanerViewModel()
     @State private var showPermissionAlert = false
-    @State private var selectedCategory: CleanupCategory? = nil
     @State private var showPhotoLibrary = false
     @State private var showRefreshSuccess = false
     @State private var isRefreshing = false
@@ -71,7 +70,7 @@ struct HomeView: View {
             } message: {
                 Text("Pour analyser vos photos, l'application a besoin d'accéder à votre bibliothèque.")
             }
-            .navigationDestination(item: $selectedCategory) { category in
+            .navigationDestination(for: CleanupCategory.self) { category in
                 destinationView(for: category)
             }
             .sheet(isPresented: $showPhotoLibrary) {
@@ -334,59 +333,64 @@ struct HomeView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                     // Doublons
-                    CompactCleanupCard(
-                        icon: "square.on.square",
-                        title: "Doublons",
-                        count: viewModel.duplicateGroups.reduce(0) { $0 + $1.items.count - 1 },
-                        color: Color(hex: "f5576c"),
-                        isEmpty: viewModel.duplicateGroups.isEmpty
-                    ) {
-                        selectedCategory = .duplicates
+                    NavigationLink(value: CleanupCategory.duplicates) {
+                        CompactCleanupCardContent(
+                            icon: "square.on.square",
+                            title: "Doublons",
+                            count: viewModel.duplicateGroups.reduce(0) { $0 + $1.items.count - 1 },
+                            color: Color(hex: "f5576c"),
+                            isEmpty: viewModel.duplicateGroups.isEmpty
+                        )
                     }
+                    .disabled(viewModel.duplicateGroups.isEmpty)
 
                     // Photos floues
-                    CompactCleanupCard(
-                        icon: "camera.metering.unknown",
-                        title: "Floues",
-                        count: viewModel.blurryPhotos.count,
-                        color: Color(hex: "fa709a"),
-                        isEmpty: viewModel.blurryPhotos.isEmpty
-                    ) {
-                        selectedCategory = .blurry
+                    NavigationLink(value: CleanupCategory.blurry) {
+                        CompactCleanupCardContent(
+                            icon: "camera.metering.unknown",
+                            title: "Floues",
+                            count: viewModel.blurryPhotos.count,
+                            color: Color(hex: "fa709a"),
+                            isEmpty: viewModel.blurryPhotos.isEmpty
+                        )
                     }
+                    .disabled(viewModel.blurryPhotos.isEmpty)
 
                     // Rafales
-                    CompactCleanupCard(
-                        icon: "square.stack.3d.up",
-                        title: "Rafales",
-                        count: viewModel.burstGroups.reduce(0) { $0 + $1.items.count - 1 },
-                        color: Color(hex: "667eea"),
-                        isEmpty: viewModel.burstGroups.isEmpty
-                    ) {
-                        selectedCategory = .bursts
+                    NavigationLink(value: CleanupCategory.bursts) {
+                        CompactCleanupCardContent(
+                            icon: "square.stack.3d.up",
+                            title: "Rafales",
+                            count: viewModel.burstGroups.reduce(0) { $0 + $1.items.count - 1 },
+                            color: Color(hex: "667eea"),
+                            isEmpty: viewModel.burstGroups.isEmpty
+                        )
                     }
+                    .disabled(viewModel.burstGroups.isEmpty)
 
                     // Captures d'écran
-                    CompactCleanupCard(
-                        icon: "camera.viewfinder",
-                        title: "Captures",
-                        count: viewModel.screenshots.count,
-                        color: Color(hex: "4facfe"),
-                        isEmpty: viewModel.screenshots.isEmpty
-                    ) {
-                        selectedCategory = .screenshots
+                    NavigationLink(value: CleanupCategory.screenshots) {
+                        CompactCleanupCardContent(
+                            icon: "camera.viewfinder",
+                            title: "Captures",
+                            count: viewModel.screenshots.count,
+                            color: Color(hex: "4facfe"),
+                            isEmpty: viewModel.screenshots.isEmpty
+                        )
                     }
+                    .disabled(viewModel.screenshots.isEmpty)
 
                     // Grosses vidéos
-                    CompactCleanupCard(
-                        icon: "film",
-                        title: "Vidéos",
-                        count: viewModel.largeVideos.count,
-                        color: Color(hex: "11998e"),
-                        isEmpty: viewModel.largeVideos.isEmpty
-                    ) {
-                        selectedCategory = .largeVideos
+                    NavigationLink(value: CleanupCategory.largeVideos) {
+                        CompactCleanupCardContent(
+                            icon: "film",
+                            title: "Vidéos",
+                            count: viewModel.largeVideos.count,
+                            color: Color(hex: "11998e"),
+                            isEmpty: viewModel.largeVideos.isEmpty
+                        )
                     }
+                    .disabled(viewModel.largeVideos.isEmpty)
                 }
                 .padding(.horizontal, 4)
             }
@@ -397,9 +401,7 @@ struct HomeView: View {
 
     // MARK: - Swipe Cleanup Card
     private var swipeCleanupCard: some View {
-        Button {
-            selectedCategory = .swipe
-        } label: {
+        NavigationLink(value: CleanupCategory.swipe) {
             ZStack(alignment: .bottomLeading) {
                 // Aperçu photo en arrière-plan
                 if let firstPhoto = viewModel.allPhotos.first {
@@ -456,7 +458,6 @@ struct HomeView: View {
             .frame(height: 180)
             .clipShape(RoundedRectangle(cornerRadius: 20))
         }
-        .buttonStyle(.plain)
     }
 
 
@@ -589,54 +590,49 @@ struct StatPill: View {
     }
 }
 
-// MARK: - Compact Cleanup Card (pour scroll horizontal)
-struct CompactCleanupCard: View {
+// MARK: - Compact Cleanup Card Content (pour scroll horizontal avec NavigationLink)
+struct CompactCleanupCardContent: View {
     let icon: String
     let title: String
     let count: Int
     let color: Color
     let isEmpty: Bool
-    let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            VStack(spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(color.opacity(isEmpty ? 0.1 : 0.15))
-                        .frame(width: 50, height: 50)
+        VStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(color.opacity(isEmpty ? 0.1 : 0.15))
+                    .frame(width: 50, height: 50)
 
-                    Image(systemName: icon)
-                        .font(.title3)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(isEmpty ? .secondary : color)
-                }
-
-                Text(title)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .foregroundStyle(isEmpty ? .secondary : .primary)
-
-                if !isEmpty {
-                    Text("\(count)")
-                        .font(.subheadline)
-                        .fontWeight(.bold)
-                        .foregroundStyle(color)
-                } else {
-                    Text("0")
-                        .font(.subheadline)
-                        .fontWeight(.bold)
-                        .foregroundStyle(.secondary)
-                }
+                Image(systemName: icon)
+                    .font(.title3)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(isEmpty ? .secondary : color)
             }
-            .frame(width: 80)
-            .padding(.vertical, 14)
-            .background(Color(.secondarySystemGroupedBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .opacity(isEmpty ? 0.5 : 1)
+
+            Text(title)
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundStyle(isEmpty ? .secondary : .primary)
+
+            if !isEmpty {
+                Text("\(count)")
+                    .font(.subheadline)
+                    .fontWeight(.bold)
+                    .foregroundStyle(color)
+            } else {
+                Text("0")
+                    .font(.subheadline)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.secondary)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(isEmpty)
+        .frame(width: 80)
+        .padding(.vertical, 14)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .opacity(isEmpty ? 0.5 : 1)
     }
 }
 
