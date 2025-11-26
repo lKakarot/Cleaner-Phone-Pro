@@ -57,6 +57,17 @@ struct DuplicateGroup: Identifiable {
     }
 }
 
+struct BurstGroup: Identifiable {
+    let id = UUID()
+    let burstIdentifier: String
+    var items: [MediaItem]
+    var selectedForDeletion: Set<String> = []
+
+    var representativeItem: MediaItem? {
+        items.first { $0.asset.representsBurst } ?? items.first
+    }
+}
+
 struct ScanResult {
     var duplicateGroups: [DuplicateGroup] = []
     var blurryPhotos: [MediaItem] = []

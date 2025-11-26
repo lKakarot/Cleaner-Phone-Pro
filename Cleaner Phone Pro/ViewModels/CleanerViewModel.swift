@@ -19,12 +19,14 @@ class CleanerViewModel: ObservableObject {
     @Published var blurryPhotos: [MediaItem] = []
     @Published var screenshots: [MediaItem] = []
     @Published var largeVideos: [(item: MediaItem, size: Int64, duration: TimeInterval)] = []
+    @Published var burstGroups: [BurstGroup] = []
 
     @Published var authorizationStatus: PHAuthorizationStatus = .notDetermined
 
     var totalIssuesCount: Int {
         let duplicatesCount = duplicateGroups.reduce(0) { $0 + $1.items.count - 1 }
-        return duplicatesCount + blurryPhotos.count + screenshots.count + largeVideos.count
+        let burstsCount = burstGroups.reduce(0) { $0 + $1.items.count - 1 }
+        return duplicatesCount + blurryPhotos.count + screenshots.count + largeVideos.count + burstsCount
     }
 
     var potentialSpaceSaved: Int64 {
@@ -108,11 +110,39 @@ class CleanerViewModel: ObservableObject {
             }
         }
         largeVideos = videosWithSize.sorted { $0.size > $1.size }
+        scanProgress = 0.92
+
+        // Phase 7: Find burst photos
+        scanPhase = "Recherche des rafales..."
+        burstGroups = findBurstPhotos(in: photos)
 
         scanProgress = 1.0
         scanPhase = "Terminé"
         isScanning = false
         hasCompletedScan = true
+    }
+
+    private func findBurstPhotos(in photos: [MediaItem]) -> [BurstGroup] {
+        var burstDict: [String: [MediaItem]] = [:]
+
+        for photo in photos {
+            if let burstId = photo.asset.burstIdentifier {
+                if burstDict[burstId] == nil {
+                    burstDict[burstId] = []
+                }
+                burstDict[burstId]?.append(photo)
+            }
+        }
+
+        // Ne garder que les groupes avec plus d'une photo
+        return burstDict.compactMap { (burstId, items) in
+            guard items.count > 1 else { return nil }
+            // Trier par date
+            let sortedItems = items.sorted {
+                ($0.creationDate ?? Date.distantPast) < ($1.creationDate ?? Date.distantPast)
+            }
+            return BurstGroup(burstIdentifier: burstId, items: sortedItems)
+        }.sorted { $0.items.count > $1.items.count }
     }
 
     func deleteItems(_ items: [MediaItem]) async -> Bool {
