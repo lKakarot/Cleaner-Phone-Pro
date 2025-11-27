@@ -4,22 +4,114 @@
 //
 
 import SwiftUI
+import Photos
+
+// MARK: - Onboarding Colors (adapts to light/dark mode)
+
+struct OnboardingColors {
+    @Environment(\.colorScheme) static var colorScheme
+
+    static var background: Color {
+        Color(.systemBackground)
+    }
+
+    static var secondaryBackground: Color {
+        Color(.secondarySystemBackground)
+    }
+
+    static var primaryText: Color {
+        Color(.label)
+    }
+
+    static var secondaryText: Color {
+        Color(.secondaryLabel)
+    }
+
+    static var tertiaryText: Color {
+        Color(.tertiaryLabel)
+    }
+
+    static var cardBackground: Color {
+        Color(.secondarySystemBackground)
+    }
+}
+
+// MARK: - Onboarding Preloader (loads photos during onboarding)
+
+@MainActor
+class OnboardingPreloader: ObservableObject {
+    @Published var isPreloading = false
+    @Published var hasAuthorization = false
+    @Published var preloadProgress: Double = 0
+
+    private var preloadTask: Task<Void, Never>?
+    private weak var viewModel: CleanerViewModel?
+
+    func setViewModel(_ viewModel: CleanerViewModel) {
+        self.viewModel = viewModel
+    }
+
+    func checkAuthorizationStatus() {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        hasAuthorization = (status == .authorized || status == .limited)
+    }
+
+    func requestAuthorizationAndPreload() async -> Bool {
+        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        hasAuthorization = (status == .authorized || status == .limited)
+
+        if hasAuthorization {
+            startPreloading()
+        }
+
+        return hasAuthorization
+    }
+
+    func startPreloading() {
+        guard hasAuthorization && !isPreloading else { return }
+        guard let viewModel = viewModel else { return }
+
+        isPreloading = true
+
+        preloadTask = Task {
+            // Start the actual photo analysis NOW during onboarding!
+            // This will analyze all categories while user browses onboarding pages
+            await viewModel.loadAllCategories()
+
+            await MainActor.run {
+                preloadProgress = 1.0
+                isPreloading = false
+            }
+        }
+    }
+
+    func cancelPreloading() {
+        preloadTask?.cancel()
+        isPreloading = false
+    }
+}
 
 struct OnboardingContainerView: View {
+    @ObservedObject var viewModel: CleanerViewModel
     @State private var currentPage = 0
     @State private var storageInfo = DeviceStorage.getStorageInfo()
+    @StateObject private var preloader = OnboardingPreloader()
+    @Environment(\.colorScheme) private var colorScheme
 
     var onComplete: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
-            // Fond noir/bleu foncé
-            Color(red: 0.02, green: 0.02, blue: 0.06)
+            // Background adapts to system theme
+            (colorScheme == .dark ? Color(red: 0.02, green: 0.02, blue: 0.06) : Color(.systemBackground))
                 .ignoresSafeArea()
 
             switch currentPage {
             case 0:
-                WelcomePageView(onContinue: { currentPage = 1 })
+                WelcomePageView(
+                    preloader: preloader,
+                    onContinue: { currentPage = 1 }
+                )
             case 1:
                 DuplicatePhotosPageView(onContinue: { currentPage = 2 })
             case 2:
@@ -31,8 +123,13 @@ struct OnboardingContainerView: View {
                     onComplete?()
                 })
             default:
-                WelcomePageView(onContinue: { currentPage = 1 })
+                WelcomePageView(preloader: preloader, onContinue: { currentPage = 1 })
             }
+        }
+        .onAppear {
+            // Connect preloader to viewModel so it can start analysis
+            preloader.setViewModel(viewModel)
+            preloader.checkAuthorizationStatus()
         }
     }
 }
@@ -92,6 +189,15 @@ struct OnboardingBottomLinks: View {
 
 struct DuplicatePhotosPageView: View {
     let onContinue: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Color(.label)
+    }
+
+    private var secondaryTextColor: Color {
+        colorScheme == .dark ? .gray : Color(.secondaryLabel)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -115,12 +221,12 @@ struct DuplicatePhotosPageView: View {
                 Text("Supprimer les\nphotos en double")
                     .font(.system(size: 32, weight: .bold))
                     .multilineTextAlignment(.center)
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryTextColor)
 
                 Text("Éliminez instantanément les photos en\ndouble et récupérez votre stockage !")
                     .font(.system(size: 16))
                     .multilineTextAlignment(.center)
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
             }
 
             Spacer()
@@ -315,6 +421,15 @@ struct PhotoCard: View {
 struct OptimizeStoragePageView: View {
     let storageInfo: DeviceStorage
     let onContinue: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Color(.label)
+    }
+
+    private var secondaryTextColor: Color {
+        colorScheme == .dark ? .gray : Color(.secondaryLabel)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -338,12 +453,12 @@ struct OptimizeStoragePageView: View {
                 Text("Optimiser le\nstockage de l'iPhone")
                     .font(.system(size: 32, weight: .bold))
                     .multilineTextAlignment(.center)
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryTextColor)
 
                 Text("Libérez jusqu'à 80 % de votre stockage et\nobtenez plus d'espace.")
                     .font(.system(size: 16))
                     .multilineTextAlignment(.center)
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
             }
 
             Spacer()
@@ -359,7 +474,7 @@ struct OptimizeStoragePageView: View {
                         .cornerRadius(22)
                     Text("Photos")
                         .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.white)
+                        .foregroundColor(primaryTextColor)
                 }
 
                 VStack(spacing: 14) {
@@ -371,7 +486,7 @@ struct OptimizeStoragePageView: View {
                         .cornerRadius(22)
                     Text("iCloud")
                         .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.white)
+                        .foregroundColor(primaryTextColor)
                 }
             }
 
@@ -381,11 +496,11 @@ struct OptimizeStoragePageView: View {
             HStack {
                 Text("iPhone")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryTextColor)
                 Spacer()
                 Text("\(storageInfo.usedGB) GB de \(storageInfo.totalGB) GB utilisés")
                     .font(.system(size: 14))
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
             }
             .padding(.horizontal, 40)
 
@@ -406,7 +521,7 @@ struct OptimizeStoragePageView: View {
             // Note
             Text("*Basé sur les données internes de CleanerPhone Pro")
                 .font(.system(size: 12))
-                .foregroundColor(.gray)
+                .foregroundColor(secondaryTextColor)
 
             Spacer().frame(height: 20)
 
@@ -548,6 +663,19 @@ struct PaywallPageView: View {
     let onSubscribe: () -> Void
 
     @State private var freeTrialEnabled = true
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Color(.label)
+    }
+
+    private var secondaryTextColor: Color {
+        colorScheme == .dark ? .gray : Color(.secondaryLabel)
+    }
+
+    private var cardBackgroundColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.08) : Color(.secondarySystemBackground)
+    }
 
     // Pourcentage utilisé
     private var usedPercentage: Int {
@@ -562,7 +690,7 @@ struct PaywallPageView: View {
                 Button(action: {}) {
                     Text("Restaurer l'achat")
                         .font(.system(size: 14))
-                        .foregroundColor(.gray)
+                        .foregroundColor(secondaryTextColor)
                 }
 
                 Spacer()
@@ -570,7 +698,7 @@ struct PaywallPageView: View {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.gray)
+                        .foregroundColor(secondaryTextColor)
                 }
             }
             .padding(.horizontal, 20)
@@ -582,11 +710,11 @@ struct PaywallPageView: View {
             VStack(spacing: 12) {
                 Text("Nettoyez le stockage")
                     .font(.system(size: 28, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryTextColor)
 
                 Text("Dites adieu à ce dont vous n'avez pas besoin")
                     .font(.system(size: 15))
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
             }
 
             Spacer().frame(height: 24)
@@ -604,7 +732,7 @@ struct PaywallPageView: View {
                             .cornerRadius(20)
                         Text("Photos")
                             .font(.system(size: 15, weight: .medium))
-                            .foregroundColor(.white)
+                            .foregroundColor(primaryTextColor)
                     }
 
                     // Badge
@@ -628,7 +756,7 @@ struct PaywallPageView: View {
                             .cornerRadius(20)
                         Text("iCloud")
                             .font(.system(size: 15, weight: .medium))
-                            .foregroundColor(.white)
+                            .foregroundColor(primaryTextColor)
                     }
 
                     // Badge
@@ -656,7 +784,7 @@ struct PaywallPageView: View {
                     .foregroundColor(.red)
                     .fontWeight(.bold)
                 Text("sur 100% utilisé")
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryTextColor)
             }
             .font(.system(size: 16))
 
@@ -672,7 +800,7 @@ struct PaywallPageView: View {
             HStack {
                 Text("Essai gratuit activé")
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryTextColor)
 
                 Spacer()
 
@@ -682,7 +810,7 @@ struct PaywallPageView: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
-            .background(Color.white.opacity(0.08))
+            .background(cardBackgroundColor)
             .cornerRadius(12)
             .padding(.horizontal, 20)
 
@@ -693,11 +821,11 @@ struct PaywallPageView: View {
                 HStack {
                     HStack(spacing: 8) {
                         Circle()
-                            .fill(Color.white)
+                            .fill(primaryTextColor)
                             .frame(width: 8, height: 8)
                         Text("Échéance aujourd'hui")
                             .font(.system(size: 14))
-                            .foregroundColor(.white)
+                            .foregroundColor(primaryTextColor)
                     }
 
                     Spacer()
@@ -712,24 +840,24 @@ struct PaywallPageView: View {
 
                     Text("€0,00")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(primaryTextColor)
                 }
 
                 HStack {
                     HStack(spacing: 8) {
                         Circle()
-                            .stroke(Color.gray, lineWidth: 1)
+                            .stroke(secondaryTextColor, lineWidth: 1)
                             .frame(width: 8, height: 8)
                         Text("Échéance 4 décembre 2025")
                             .font(.system(size: 14))
-                            .foregroundColor(.gray)
+                            .foregroundColor(secondaryTextColor)
                     }
 
                     Spacer()
 
                     Text("€8,99")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(primaryTextColor)
                 }
             }
             .padding(.horizontal, 24)
@@ -758,7 +886,7 @@ struct PaywallPageView: View {
                     Text("Sécurisé avec Apple")
                         .font(.system(size: 12))
                 }
-                .foregroundColor(.gray)
+                .foregroundColor(secondaryTextColor)
 
                 HStack(spacing: 4) {
                     Text("Confidentialité")
@@ -768,7 +896,7 @@ struct PaywallPageView: View {
                         .underline()
                 }
                 .font(.system(size: 12))
-                .foregroundColor(.gray)
+                .foregroundColor(secondaryTextColor)
             }
 
             Spacer().frame(height: 20)
@@ -801,24 +929,38 @@ struct PaywallStorageBar: View {
 // MARK: - Pro Feature Card
 
 struct ProFeatureCard: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Color(.label)
+    }
+
+    private var secondaryTextColor: Color {
+        colorScheme == .dark ? .gray : Color(.secondaryLabel)
+    }
+
+    private var cardBackgroundColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.08) : Color(.secondarySystemBackground)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("CleanerPhone Pro")
                 .font(.system(size: 17, weight: .bold))
-                .foregroundColor(.white)
+                .foregroundColor(primaryTextColor)
 
             Text("Nettoyage intelligent, compresseur vidéo, stockage secret, gestion des contacts, sans annonces ni limites.")
                 .font(.system(size: 14))
-                .foregroundColor(.gray)
+                .foregroundColor(secondaryTextColor)
                 .lineSpacing(2)
 
             Text("Gratuit pendant 7 jours, puis €8,99/semaine")
                 .font(.system(size: 14))
-                .foregroundColor(.white.opacity(0.8))
+                .foregroundColor(primaryTextColor.opacity(0.8))
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.08))
+        .background(cardBackgroundColor)
         .cornerRadius(14)
     }
 }
@@ -826,5 +968,5 @@ struct ProFeatureCard: View {
 // MARK: - Preview
 
 #Preview {
-    OnboardingContainerView()
+    OnboardingContainerView(viewModel: CleanerViewModel())
 }

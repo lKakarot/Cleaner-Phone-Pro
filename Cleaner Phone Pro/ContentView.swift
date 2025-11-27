@@ -9,7 +9,7 @@ import SwiftUI
 import Photos
 
 struct ContentView: View {
-    @StateObject private var viewModel = CleanerViewModel()
+    @ObservedObject var viewModel: CleanerViewModel
     @State private var selectedTab = 0
 
     var body: some View {
@@ -39,9 +39,7 @@ struct ContentView: View {
                 .tag(2)
         }
         .tint(.blue)
-        .task {
-            await viewModel.requestAccess()
-        }
+        // Note: requestAccess() is now called during onboarding
     }
 }
 
@@ -409,9 +407,24 @@ struct TimelineTabView: View {
                 .background(Color(.systemBackground))
 
                 // Content
-                if isLoading {
+                if isLoading || viewModel.isAnalyzing {
                     Spacer()
-                    ProgressView("Chargement...")
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .scaleEffect(1.2)
+                        if viewModel.isAnalyzing {
+                            Text(viewModel.analysisMessage)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            ProgressView(value: viewModel.analysisProgress)
+                                .progressViewStyle(.linear)
+                                .frame(width: 200)
+                        } else {
+                            Text("Chargement...")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                     Spacer()
                 } else if timelineSections.isEmpty {
                     Spacer()
@@ -441,6 +454,7 @@ struct TimelineTabView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .onChange(of: groupBy) { _ in loadTimeline() }
+            .onChange(of: viewModel.dataVersion) { _ in loadTimeline() }
             .onAppear { loadTimeline() }
             .fullScreenCover(item: $selectedPeriod) { period in
                 TimelinePeriodDetailView(
@@ -720,8 +734,7 @@ struct TimelinePeriodDetailView: View {
             .fullScreenCover(isPresented: $showSwipeMode) {
                 TimelineSwipeModeView(
                     period: period,
-                    viewModel: viewModel,
-                    onDismiss: { showSwipeMode = false }
+                    viewModel: viewModel
                 )
             }
         }
@@ -989,8 +1002,8 @@ struct PhotoViewerPage: View {
 struct TimelineSwipeModeView: View {
     let period: TimelinePeriod
     @ObservedObject var viewModel: CleanerViewModel
-    let onDismiss: () -> Void
 
+    @Environment(\.dismiss) private var dismiss
     @State private var currentIndex = 0
     @State private var offset: CGSize = .zero
     @State private var toKeep: [MediaItem] = []
@@ -1012,7 +1025,7 @@ struct TimelineSwipeModeView: View {
                     toDelete: toDelete,
                     onDeleteConfirmed: deleteSelectedItems,
                     onReset: resetSwipe,
-                    onDismiss: onDismiss
+                    onDismiss: { dismiss() }
                 )
             } else if currentIndex >= period.items.count {
                 // Finished - show results
@@ -1021,7 +1034,7 @@ struct TimelineSwipeModeView: View {
                 VStack(spacing: 20) {
                     // Header
                     HStack {
-                        Button(action: onDismiss) {
+                        Button(action: { dismiss() }) {
                             Image(systemName: "xmark")
                                 .font(.title3)
                                 .fontWeight(.semibold)
@@ -1276,7 +1289,7 @@ struct TimelineSwipeModeView: View {
         Task {
             let _ = await viewModel.deleteItems(toDelete)
             await MainActor.run {
-                onDismiss()
+                dismiss()
             }
         }
     }
@@ -1444,12 +1457,21 @@ struct SwipeTabView: View {
                 Color(.systemGroupedBackground)
                     .ignoresSafeArea()
 
-                if isLoading {
+                if isLoading || viewModel.isAnalyzing {
                     VStack(spacing: 16) {
                         ProgressView()
                             .scaleEffect(1.5)
-                        Text("Chargement des médias...")
-                            .foregroundColor(.secondary)
+                        if viewModel.isAnalyzing {
+                            Text(viewModel.analysisMessage)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            ProgressView(value: viewModel.analysisProgress)
+                                .progressViewStyle(.linear)
+                                .frame(width: 200)
+                        } else {
+                            Text("Chargement des médias...")
+                                .foregroundColor(.secondary)
+                        }
                     }
                 } else if allMedia.isEmpty {
                     VStack(spacing: 20) {
@@ -1605,6 +1627,10 @@ struct SwipeTabView: View {
             }
             .onChange(of: currentIndex) { _ in
                 loadHDForCurrentItem()
+            }
+            .onChange(of: viewModel.dataVersion) { _ in
+                // Reload media when data changes (e.g., after deletion)
+                loadAllMedia()
             }
         }
     }
@@ -2071,5 +2097,5 @@ struct SwipeResultsView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(viewModel: CleanerViewModel())
 }

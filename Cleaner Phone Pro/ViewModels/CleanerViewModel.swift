@@ -19,6 +19,7 @@ class CleanerViewModel: ObservableObject {
     @Published var totalVideoCount = 0
     @Published var diagnostics: LibraryDiagnostics?
     @Published var showDiagnostics = false
+    @Published var dataVersion: Int = 0  // Incremented when data changes (for UI refresh)
 
     private let photoService = PhotoLibraryService.shared
     private let cacheService = CacheService.shared
@@ -39,6 +40,9 @@ class CleanerViewModel: ObservableObject {
     }
 
     func loadAllCategories() async {
+        // Sync authorization status (important when called from onboarding preloader)
+        authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+
         // Start with progress bar immediately
         isAnalyzing = true
         analysisProgress = 0
@@ -304,25 +308,57 @@ class CleanerViewModel: ObservableObject {
     }
 
     func deleteItems(_ items: [MediaItem]) async -> Bool {
+        guard !items.isEmpty else { return true }
+
         isDeleting = true
         defer { isDeleting = false }
 
         let assets = items.map { $0.asset }
+        let deletedIds = Set(items.map { $0.id })
 
         do {
             try await PHPhotoLibrary.shared().performChanges {
                 PHAssetChangeRequest.deleteAssets(assets as NSFastEnumeration)
             }
 
+            // Update local state immediately (no need to reload everything!)
+            removeItemsFromCategories(ids: deletedIds)
+
             // Clear cache since library changed
             cacheService.clearCache()
 
-            // Reload categories after deletion
-            await loadAllCategories()
+            // Increment version to trigger UI refresh
+            dataVersion += 1
+
             return true
         } catch {
             print("Error deleting items: \(error)")
             return false
+        }
+    }
+
+    /// Remove items from all categories by their IDs (fast local update)
+    private func removeItemsFromCategories(ids: Set<String>) {
+        for index in categories.indices {
+            // Remove from flat items list
+            categories[index].items.removeAll { ids.contains($0.id) }
+
+            // Remove from similar groups if applicable
+            if categories[index].category.hasSimilarGroups {
+                for groupIndex in categories[index].similarGroups.indices {
+                    categories[index].similarGroups[groupIndex].items.removeAll { ids.contains($0.id) }
+                }
+                // Remove empty groups
+                categories[index].similarGroups.removeAll { $0.items.isEmpty }
+            }
+        }
+
+        // Update counts
+        totalPhotoCount = categories.reduce(0) { count, cat in
+            count + cat.items.filter { $0.asset.mediaType == .image }.count
+        }
+        totalVideoCount = categories.reduce(0) { count, cat in
+            count + cat.items.filter { $0.asset.mediaType == .video }.count
         }
     }
 

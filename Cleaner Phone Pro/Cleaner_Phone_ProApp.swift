@@ -48,15 +48,31 @@ struct Cleaner_Phone_ProApp: App {
 // MARK: - Root View (Onboarding → App)
 
 struct RootView: View {
-    @State private var showOnboarding = true
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    @StateObject private var viewModel = CleanerViewModel()
+    @State private var isInitialized = false
 
     var body: some View {
-        if showOnboarding {
-            OnboardingContainerView(onComplete: {
-                showOnboarding = false
-            })
-        } else {
-            ContentView()
+        Group {
+            if !hasCompletedOnboarding {
+                OnboardingContainerView(
+                    viewModel: viewModel,
+                    onComplete: {
+                        hasCompletedOnboarding = true
+                    }
+                )
+            } else {
+                ContentView(viewModel: viewModel)
+                    .onAppear {
+                        // Load photos if returning user (already completed onboarding)
+                        if !isInitialized {
+                            isInitialized = true
+                            Task {
+                                await viewModel.loadAllCategories()
+                            }
+                        }
+                    }
+            }
         }
     }
 }

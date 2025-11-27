@@ -7,9 +7,13 @@
 
 import SwiftUI
 
+// Note: OnboardingContainerView is now used directly from RootView
+// This wrapper is kept for compatibility
 struct OnboardingView: View {
+    @StateObject private var viewModel = CleanerViewModel()
+
     var body: some View {
-        OnboardingContainerView()
+        OnboardingContainerView(viewModel: viewModel)
     }
 }
 
@@ -17,7 +21,19 @@ struct OnboardingView: View {
 
 struct WelcomePageView: View {
     @State private var storageInfo = DeviceStorage.getStorageInfo()
+    @State private var isRequestingAccess = false
+    @State private var showAccessDeniedAlert = false
+    @ObservedObject var preloader: OnboardingPreloader
+    @Environment(\.colorScheme) private var colorScheme
     let onContinue: () -> Void
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Color(.label)
+    }
+
+    private var secondaryTextColor: Color {
+        colorScheme == .dark ? .gray : Color(.secondaryLabel)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,7 +48,7 @@ struct WelcomePageView: View {
                 Text("CleanerPhone Pro")
                     .font(.system(size: 34, weight: .bold))
             }
-            .foregroundColor(.white)
+            .foregroundColor(primaryTextColor)
 
             Spacer()
                 .frame(height: 50)
@@ -49,7 +65,7 @@ struct WelcomePageView: View {
                         .cornerRadius(26)
                     Text("Photos")
                         .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(.white)
+                        .foregroundColor(primaryTextColor)
                 }
 
                 // iCloud
@@ -62,7 +78,7 @@ struct WelcomePageView: View {
                         .cornerRadius(26)
                     Text("iCloud")
                         .font(.system(size: 18, weight: .medium))
-                        .foregroundColor(.white)
+                        .foregroundColor(primaryTextColor)
                 }
             }
 
@@ -83,7 +99,7 @@ struct WelcomePageView: View {
             HStack(spacing: 4) {
                 Text("\(storageInfo.usedGB) sur \(storageInfo.totalGB)Go")
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryTextColor)
                 Text("utilisés")
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundColor(.purple)
@@ -91,22 +107,22 @@ struct WelcomePageView: View {
 
             Spacer()
 
-            // Texte légal
+            // Texte légal avec demande d'accès
             VStack(spacing: 4) {
                 Text("CleanerPhone Pro doit accéder à vos photos pour libérer de l'espace.")
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryTextColor)
                 + Text(" Nous voulons protéger votre vie privée en toute transparence. En commençant, vous acceptez nos ")
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
                 + Text("Conditions d'utilisation")
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
                     .underline()
                 + Text(" et notre ")
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
                 + Text("Politique de confidentialité")
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
                     .underline()
                 + Text(".")
-                    .foregroundColor(.gray)
+                    .foregroundColor(secondaryTextColor)
             }
             .font(.system(size: 14))
             .multilineTextAlignment(.center)
@@ -115,26 +131,70 @@ struct WelcomePageView: View {
             Spacer()
                 .frame(height: 30)
 
-            // Bouton Commencer
-            Button(action: onContinue) {
-                Text("Commencer")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 56)
-                    .background(
-                        LinearGradient(
-                            colors: [.blue, .purple],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
+            // Bouton Commencer - demande l'accès aux photos
+            Button(action: requestPhotoAccessAndContinue) {
+                HStack(spacing: 10) {
+                    if isRequestingAccess {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    }
+                    Text(preloader.hasAuthorization ? "Commencer" : "Autoriser l'accès aux photos")
+                        .font(.system(size: 18, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 56)
+                .background(
+                    LinearGradient(
+                        colors: [.blue, .purple],
+                        startPoint: .leading,
+                        endPoint: .trailing
                     )
-                    .cornerRadius(14)
+                )
+                .cornerRadius(14)
             }
+            .disabled(isRequestingAccess)
             .padding(.horizontal, 24)
 
             Spacer()
                 .frame(height: 40)
+        }
+        .alert("Accès aux photos requis", isPresented: $showAccessDeniedAlert) {
+            Button("Ouvrir les Réglages") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            Button("Annuler", role: .cancel) {}
+        } message: {
+            Text("Pour utiliser CleanerPhone Pro, veuillez autoriser l'accès aux photos dans les Réglages.")
+        }
+    }
+
+    private func requestPhotoAccessAndContinue() {
+        // If already authorized, start preloading and continue
+        if preloader.hasAuthorization {
+            preloader.startPreloading()
+            onContinue()
+            return
+        }
+
+        isRequestingAccess = true
+
+        Task {
+            let granted = await preloader.requestAuthorizationAndPreload()
+
+            await MainActor.run {
+                isRequestingAccess = false
+
+                if granted {
+                    // Access granted - preloading started, continue to next page
+                    onContinue()
+                } else {
+                    // Access denied - show alert
+                    showAccessDeniedAlert = true
+                }
+            }
         }
     }
 }
