@@ -10,6 +10,9 @@ import Photos
 class CleanerViewModel: ObservableObject {
     @Published var categories: [CategoryData] = []
     @Published var isLoading = false
+    @Published var isAnalyzing = false
+    @Published var analysisProgress: Double = 0
+    @Published var analysisMessage = ""
     @Published var authorizationStatus: PHAuthorizationStatus = .notDetermined
     @Published var isDeleting = false
     @Published var totalPhotoCount = 0
@@ -19,6 +22,7 @@ class CleanerViewModel: ObservableObject {
 
     private let photoService = PhotoLibraryService.shared
     private let cacheService = CacheService.shared
+    private let hashService = ImageHashService.shared
 
     init() {
         // Initialize with empty categories
@@ -35,11 +39,17 @@ class CleanerViewModel: ObservableObject {
     }
 
     func loadAllCategories() async {
-        isLoading = true
+        // Start with progress bar immediately
+        isAnalyzing = true
+        analysisProgress = 0
+        analysisMessage = "Récupération des médias..."
 
         // Run diagnostics
         let diag = photoService.getLibraryDiagnostics()
         diagnostics = diag
+
+        analysisProgress = 0.05
+        analysisMessage = "Chargement photos..."
 
         // Phase 1: Fast metadata scan (no thumbnails)
         async let screenshots = photoService.fetchScreenshots()
@@ -48,28 +58,107 @@ class CleanerViewModel: ObservableObject {
         async let allVideos = photoService.fetchAllVideos()
 
         let screenshotsResult = await screenshots
+        analysisProgress = 0.10
+
         let largeVideosResult = await largeVideos
+        analysisProgress = 0.12
+
         let allPhotosResult = await allPhotos
+        analysisProgress = 0.18
+
         let allVideosResult = await allVideos
+        analysisProgress = 0.20
+        analysisMessage = "Organisation..."
 
         // Store total counts for display
         totalPhotoCount = allPhotosResult.count + screenshotsResult.count
         totalVideoCount = allVideosResult.count
 
-        // Find similar photos/videos/screenshots with groups (sorted by most recent first)
-        let (similarPhotos, photoGroups) = findPotentialDuplicatesWithGroups(in: allPhotosResult)
+        // Videos: keep date-based grouping (can't hash videos easily)
         let (similarVideos, videoGroups) = findPotentialDuplicatesWithGroups(in: allVideosResult)
-        let (similarScreenshots, screenshotGroups) = findPotentialDuplicatesWithGroups(in: screenshotsResult)
 
-        // Screenshots that are NOT similar
+        // Set initial categories with date-based grouping (fast)
+        let (initialSimilarPhotos, initialPhotoGroups) = findPotentialDuplicatesWithGroups(in: allPhotosResult)
+        let (initialSimilarScreenshots, initialScreenshotGroups) = findPotentialDuplicatesWithGroups(in: screenshotsResult)
+
+        let initialSimilarScreenshotIds = Set(initialSimilarScreenshots.map { $0.id })
+        let initialUniqueScreenshots = screenshotsResult.filter { !initialSimilarScreenshotIds.contains($0.id) }
+        let initialSimilarPhotoIds = Set(initialSimilarPhotos.map { $0.id })
+        let initialOthers = allPhotosResult.filter { !initialSimilarPhotoIds.contains($0.id) }
+
+        analysisProgress = 0.25
+
+        // Show categories immediately (user can start browsing)
+        categories = [
+            CategoryData(category: .similarPhotos, items: initialSimilarPhotos, similarGroups: initialPhotoGroups),
+            CategoryData(category: .similarVideos, items: similarVideos, similarGroups: videoGroups),
+            CategoryData(category: .similarScreenshots, items: initialSimilarScreenshots, similarGroups: initialScreenshotGroups),
+            CategoryData(category: .screenshots, items: initialUniqueScreenshots),
+            CategoryData(category: .largeVideos, items: largeVideosResult),
+            CategoryData(category: .others, items: initialOthers)
+        ]
+
+        // Load preview thumbnails (in parallel with analysis)
+        Task {
+            await loadPreviewThumbnails()
+        }
+
+        // Phase 2: Run similarity analysis
+        analysisMessage = "Analyse des similarités..."
+
+        // Compute hashes for photos
+        let photosToAnalyze = Array(allPhotosResult.prefix(2000))
+        let photoHashes = await hashService.computeHashes(for: photosToAnalyze) { progress in
+            self.analysisProgress = 0.25 + progress * 0.35 // 25-60%
+            self.analysisMessage = "Analyse photos..."
+        }
+
+        // Compute hashes for screenshots
+        let screenshotsToAnalyze = Array(screenshotsResult.prefix(1000))
+        let screenshotHashes = await hashService.computeHashes(for: screenshotsToAnalyze) { progress in
+            self.analysisProgress = 0.60 + progress * 0.30 // 60-90%
+            self.analysisMessage = "Analyse screenshots..."
+        }
+
+        analysisProgress = 0.92
+        analysisMessage = "Regroupement..."
+
+        // Find similar photos using advanced perceptual hashing
+        let photoSimilarGroups = hashService.groupBySimilarityAdvanced(
+            items: photosToAnalyze,
+            hashes: photoHashes,
+            strictThreshold: 6,
+            looseThreshold: 16,
+            dayWindow: 30
+        )
+
+        // Find similar screenshots
+        let screenshotSimilarGroups = hashService.groupBySimilarity(
+            items: screenshotsToAnalyze,
+            hashes: screenshotHashes,
+            threshold: 10
+        )
+
+        analysisProgress = 0.96
+
+        // Convert to SimilarGroup format
+        let photoGroups = photoSimilarGroups.enumerated().map { index, items in
+            SimilarGroup(dateKey: "group_\(index)", items: items)
+        }
+        let similarPhotos = photoGroups.flatMap { $0.items }
+
+        let screenshotGroups = screenshotSimilarGroups.enumerated().map { index, items in
+            SimilarGroup(dateKey: "group_\(index)", items: items)
+        }
+        let similarScreenshots = screenshotGroups.flatMap { $0.items }
+
+        // Update categories with better similarity detection
         let similarScreenshotIds = Set(similarScreenshots.map { $0.id })
         let uniqueScreenshots = screenshotsResult.filter { !similarScreenshotIds.contains($0.id) }
-
-        // Others = photos that are not screenshots and not in similar
         let similarPhotoIds = Set(similarPhotos.map { $0.id })
         let others = allPhotosResult.filter { !similarPhotoIds.contains($0.id) }
 
-        // Set categories immediately (without thumbnails) - NO LIMIT on others
+        // Update categories with improved results
         categories = [
             CategoryData(category: .similarPhotos, items: similarPhotos, similarGroups: photoGroups),
             CategoryData(category: .similarVideos, items: similarVideos, similarGroups: videoGroups),
@@ -79,9 +168,14 @@ class CleanerViewModel: ObservableObject {
             CategoryData(category: .others, items: others)
         ]
 
-        isLoading = false
+        analysisProgress = 1.0
+        analysisMessage = "Terminé"
 
-        // Phase 2: Load preview thumbnails (only first 3 of each category)
+        // Small delay to show 100% before hiding
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        isAnalyzing = false
+
+        // Reload preview thumbnails for updated categories
         await loadPreviewThumbnails()
     }
 

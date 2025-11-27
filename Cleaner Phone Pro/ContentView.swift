@@ -59,80 +59,85 @@ struct CleanerTabView: View {
                 if viewModel.authorizationStatus == .denied || viewModel.authorizationStatus == .restricted {
                     PermissionDeniedView()
                 } else if viewModel.authorizationStatus == .authorized || viewModel.authorizationStatus == .limited {
-                    ScrollView {
-                        LazyVStack(spacing: 16) {
-                            // Warning if limited access
-                            if viewModel.authorizationStatus == .limited {
-                                LimitedAccessBanner()
-                            }
+                    VStack(spacing: 0) {
+                        // Progress bar for background analysis
+                        if viewModel.isAnalyzing {
+                            AnalysisProgressBar(
+                                progress: viewModel.analysisProgress,
+                                message: viewModel.analysisMessage
+                            )
+                        }
 
-                            // Stats header with diagnostic button
-                            if viewModel.totalPhotoCount > 0 || viewModel.totalVideoCount > 0 {
-                                HStack {
-                                    // Diagnostic info
-                                    if let diag = viewModel.diagnostics {
-                                        VStack(alignment: .leading, spacing: 4) {
+                        ScrollView {
+                            LazyVStack(spacing: 16) {
+                                // Warning if limited access
+                                if viewModel.authorizationStatus == .limited {
+                                    LimitedAccessBanner()
+                                }
+
+                                // Stats header with diagnostic button
+                                if viewModel.totalPhotoCount > 0 || viewModel.totalVideoCount > 0 {
+                                    HStack {
+                                        // Diagnostic info
+                                        if let diag = viewModel.diagnostics {
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                HStack {
+                                                    Label("\(viewModel.totalPhotoCount) photos", systemImage: "photo")
+                                                    Spacer()
+                                                    Label("\(viewModel.totalVideoCount) vidéos", systemImage: "video")
+                                                }
+
+                                                // Show warning only if there's a real discrepancy (excluding audio)
+                                                let totalFetched = viewModel.totalPhotoCount + viewModel.totalVideoCount
+                                                let expectedTotal = diag.totalImages + diag.totalVideos
+                                                if totalFetched < expectedTotal {
+                                                    let missing = expectedTotal - totalFetched
+                                                    HStack(spacing: 4) {
+                                                        Image(systemName: "eye.slash")
+                                                            .foregroundColor(.orange)
+                                                        if missing <= diag.hiddenCount && diag.hiddenCount > 0 {
+                                                            Text("\(missing) photos masquées")
+                                                        } else {
+                                                            Text("\(missing) éléments non accessibles")
+                                                        }
+                                                    }
+                                                    .foregroundColor(.orange)
+                                                    .font(.caption2)
+                                                    .padding(.top, 2)
+                                                }
+                                            }
+                                        } else {
                                             HStack {
                                                 Label("\(viewModel.totalPhotoCount) photos", systemImage: "photo")
                                                 Spacer()
                                                 Label("\(viewModel.totalVideoCount) vidéos", systemImage: "video")
                                             }
-
-                                            // Show warning only if there's a real discrepancy (excluding audio)
-                                            let totalFetched = viewModel.totalPhotoCount + viewModel.totalVideoCount
-                                            let expectedTotal = diag.totalImages + diag.totalVideos
-                                            if totalFetched < expectedTotal {
-                                                let missing = expectedTotal - totalFetched
-                                                HStack(spacing: 4) {
-                                                    Image(systemName: "eye.slash")
-                                                        .foregroundColor(.orange)
-                                                    if missing <= diag.hiddenCount && diag.hiddenCount > 0 {
-                                                        Text("\(missing) photos masquées")
-                                                    } else {
-                                                        Text("\(missing) éléments non accessibles")
-                                                    }
-                                                }
-                                                .foregroundColor(.orange)
-                                                .font(.caption2)
-                                                .padding(.top, 2)
-                                            }
-                                        }
-                                    } else {
-                                        HStack {
-                                            Label("\(viewModel.totalPhotoCount) photos", systemImage: "photo")
-                                            Spacer()
-                                            Label("\(viewModel.totalVideoCount) vidéos", systemImage: "video")
                                         }
                                     }
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal)
                                 }
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal)
-                            }
 
-                            // Diagnostic panel (expandable)
-                            if let diag = viewModel.diagnostics, viewModel.showDiagnostics {
-                                DiagnosticsView(diagnostics: diag)
-                            }
-
-                            ForEach(viewModel.categories) { categoryData in
-                                NavigationLink(destination: CategoryDetailView(
-                                    viewModel: viewModel,
-                                    categoryData: categoryData
-                                )) {
-                                    CategoryCardView(categoryData: categoryData)
+                                // Diagnostic panel (expandable)
+                                if let diag = viewModel.diagnostics, viewModel.showDiagnostics {
+                                    DiagnosticsView(diagnostics: diag)
                                 }
-                                .buttonStyle(.plain)
+
+                                ForEach(viewModel.categories) { categoryData in
+                                    NavigationLink(destination: CategoryDetailView(
+                                        viewModel: viewModel,
+                                        categoryData: categoryData
+                                    )) {
+                                        CategoryCardView(categoryData: categoryData)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
+                            .padding()
                         }
-                        .padding()
-                    }
-                    .refreshable {
-                        await viewModel.loadAllCategories()
-                    }
-                    .overlay {
-                        if viewModel.isLoading {
-                            LoadingOverlay()
+                        .refreshable {
+                            await viewModel.loadAllCategories()
                         }
                     }
                 }
@@ -152,6 +157,54 @@ struct CleanerTabView: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Analysis Progress Bar
+
+struct AnalysisProgressBar: View {
+    let progress: Double
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Image(systemName: "sparkle.magnifyingglass")
+                    .foregroundColor(.blue)
+                    .font(.caption)
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("\(Int(progress * 100))%")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.blue)
+            }
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(.systemGray5))
+                        .frame(height: 4)
+
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(
+                            LinearGradient(
+                                colors: [.blue, .purple],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: geometry.size.width * progress, height: 4)
+                        .animation(.easeInOut(duration: 0.3), value: progress)
+                }
+            }
+            .frame(height: 4)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .background(Color(.systemBackground))
     }
 }
 
@@ -300,6 +353,7 @@ struct PermissionDeniedView: View {
 }
 
 struct LoadingOverlay: View {
+    var message: String = "Analyse en cours..."
     @State private var isAnimating = false
 
     var body: some View {
@@ -351,9 +405,10 @@ struct LoadingOverlay: View {
                         )
                 }
 
-                Text("Analyse en cours...")
+                Text(message)
                     .font(.title3)
                     .fontWeight(.semibold)
+                    .multilineTextAlignment(.center)
             }
             .padding(40)
             .background(
