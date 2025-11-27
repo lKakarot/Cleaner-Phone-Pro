@@ -40,6 +40,22 @@ struct Cleaner_Phone_ProApp: App {
 
     var body: some Scene {
         WindowGroup {
+            RootView()
+        }
+    }
+}
+
+// MARK: - Root View (Onboarding → App)
+
+struct RootView: View {
+    @State private var showOnboarding = true
+
+    var body: some View {
+        if showOnboarding {
+            OnboardingContainerView(onComplete: {
+                showOnboarding = false
+            })
+        } else {
             ContentView()
         }
     }

@@ -9,6 +9,8 @@ struct OnboardingContainerView: View {
     @State private var currentPage = 0
     @State private var storageInfo = DeviceStorage.getStorageInfo()
 
+    var onComplete: (() -> Void)? = nil
+
     var body: some View {
         ZStack {
             // Fond noir/bleu foncé
@@ -24,9 +26,9 @@ struct OnboardingContainerView: View {
                 OptimizeStoragePageView(storageInfo: storageInfo, onContinue: { currentPage = 3 })
             case 3:
                 PaywallPageView(storageInfo: storageInfo, onClose: {
-                    // Fin de l'onboarding - à définir
+                    onComplete?()
                 }, onSubscribe: {
-                    // Action d'abonnement - à définir
+                    onComplete?()
                 })
             default:
                 WelcomePageView(onContinue: { currentPage = 1 })
@@ -736,7 +738,7 @@ struct PaywallPageView: View {
 
             // Bouton principal
             Button(action: onSubscribe) {
-                Text("Essayer Gratuit")
+                Text("Essayer gratuitement")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
