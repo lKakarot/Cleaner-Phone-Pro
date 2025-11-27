@@ -11,7 +11,6 @@ struct CategoryDetailView: View {
     @ObservedObject var viewModel: CleanerViewModel
     let categoryData: CategoryData
     @State private var selectedItems: Set<MediaItem> = []
-    @State private var showDeleteConfirmation = false
     @State private var isLoadingThumbnails = true
     @State private var showFullAccordion = false
     @Environment(\.dismiss) private var dismiss
@@ -51,9 +50,20 @@ struct CategoryDetailView: View {
                         }
                     }
 
-                    // Delete button
+                    // Delete button - iOS will show its own confirmation
                     if !selectedItems.isEmpty {
-                        Button(action: { showDeleteConfirmation = true }) {
+                        Button(action: {
+                            Task {
+                                let itemsToDelete = Array(selectedItems)
+                                let success = await viewModel.deleteItems(itemsToDelete)
+                                if success {
+                                    selectedItems.removeAll()
+                                    if currentCategoryData.items.isEmpty {
+                                        dismiss()
+                                    }
+                                }
+                            }
+                        }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "trash")
                                 Text("\(selectedItems.count)")
@@ -63,25 +73,6 @@ struct CategoryDetailView: View {
                     }
                 }
             }
-        }
-        .alert("Supprimer les photos", isPresented: $showDeleteConfirmation) {
-            Button("Annuler", role: .cancel) { }
-            Button("Supprimer", role: .destructive) {
-                Task {
-                    let itemsToDelete = Array(selectedItems)
-                    let success = await viewModel.deleteItems(itemsToDelete)
-                    if success {
-                        selectedItems.removeAll()
-                        if currentCategoryData.items.isEmpty {
-                            dismiss()
-                        }
-                    }
-                }
-            }
-        } message: {
-            let totalSize = selectedItems.reduce(0) { $0 + $1.fileSize }
-            let formattedSize = ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file)
-            Text("Voulez-vous supprimer \(selectedItems.count) photo(s) (\(formattedSize)) ?")
         }
         .overlay {
             if viewModel.isDeleting {

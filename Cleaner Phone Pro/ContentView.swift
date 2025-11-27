@@ -1179,7 +1179,6 @@ struct SwipeResultsView: View {
     let onDeleteConfirmed: () -> Void
     let onReset: () -> Void
 
-    @State private var showDeleteConfirmation = false
     @State private var isDeleting = false
 
     var totalSizeToDelete: Int64 {
@@ -1252,7 +1251,8 @@ struct SwipeResultsView: View {
             VStack(spacing: 12) {
                 if !toDelete.isEmpty {
                     Button(action: {
-                        showDeleteConfirmation = true
+                        isDeleting = true
+                        onDeleteConfirmed()
                     }) {
                         HStack {
                             if isDeleting {
@@ -1291,15 +1291,6 @@ struct SwipeResultsView: View {
             .padding(.bottom, 30)
         }
         .padding()
-        .alert("Confirmer la suppression", isPresented: $showDeleteConfirmation) {
-            Button("Annuler", role: .cancel) {}
-            Button("Supprimer", role: .destructive) {
-                isDeleting = true
-                onDeleteConfirmed()
-            }
-        } message: {
-            Text("Supprimer \(toDelete.count) éléments ?\n\nIls seront déplacés dans \"Supprimés récemment\" pendant 30 jours.")
-        }
     }
 }
 
