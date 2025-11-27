@@ -383,44 +383,20 @@ struct LoadingOverlay: View {
 struct TimelineTabView: View {
     @ObservedObject var viewModel: CleanerViewModel
     @State private var groupBy: TimelineGrouping = .month
-    @State private var mediaFilter: MediaFilter = .all
-    @State private var timelineData: [TimelineSection] = []
+    @State private var timelineSections: [TimelinePeriod] = []
     @State private var isLoading = true
+    @State private var selectedPeriod: TimelinePeriod?
 
     enum TimelineGrouping: String, CaseIterable {
         case month = "Mois"
         case year = "Année"
     }
 
-    enum MediaFilter: String, CaseIterable {
-        case all = "Tout"
-        case photos = "Photos"
-        case videos = "Vidéos"
-        case screenshots = "Screenshots"
-
-        var icon: String {
-            switch self {
-            case .all: return "square.grid.2x2"
-            case .photos: return "photo"
-            case .videos: return "video"
-            case .screenshots: return "camera.viewfinder"
-            }
-        }
-    }
-
-    struct TimelineSection: Identifiable {
-        let id = UUID()
-        let title: String
-        let date: Date
-        let items: [MediaItem]
-    }
-
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // Filters
+                // Header with grouping selector
                 VStack(spacing: 12) {
-                    // Group by selector
                     Picker("Grouper par", selection: $groupBy) {
                         ForEach(TimelineGrouping.allCases, id: \.self) { grouping in
                             Text(grouping.rawValue).tag(grouping)
@@ -428,33 +404,6 @@ struct TimelineTabView: View {
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal)
-
-                    // Media filter
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 10) {
-                            ForEach(MediaFilter.allCases, id: \.self) { filter in
-                                Button(action: {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        mediaFilter = filter
-                                    }
-                                }) {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: filter.icon)
-                                            .font(.caption)
-                                        Text(filter.rawValue)
-                                            .font(.subheadline)
-                                    }
-                                    .fontWeight(.medium)
-                                    .foregroundColor(mediaFilter == filter ? .white : .primary)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 8)
-                                    .background(mediaFilter == filter ? Color.blue : Color(.systemGray5))
-                                    .cornerRadius(20)
-                                }
-                            }
-                        }
-                        .padding(.horizontal)
-                    }
                 }
                 .padding(.vertical, 12)
                 .background(Color(.systemBackground))
@@ -464,7 +413,7 @@ struct TimelineTabView: View {
                     Spacer()
                     ProgressView("Chargement...")
                     Spacer()
-                } else if timelineData.isEmpty {
+                } else if timelineSections.isEmpty {
                     Spacer()
                     VStack(spacing: 16) {
                         Image(systemName: "photo.on.rectangle.angled")
@@ -477,42 +426,29 @@ struct TimelineTabView: View {
                     Spacer()
                 } else {
                     ScrollView {
-                        LazyVStack(spacing: 24, pinnedViews: .sectionHeaders) {
-                            ForEach(timelineData) { section in
-                                Section {
-                                    LazyVGrid(columns: [
-                                        GridItem(.flexible(), spacing: 2),
-                                        GridItem(.flexible(), spacing: 2),
-                                        GridItem(.flexible(), spacing: 2)
-                                    ], spacing: 2) {
-                                        ForEach(section.items) { item in
-                                            TimelineThumbnailView(item: item)
-                                        }
-                                    }
-                                    .padding(.horizontal, 2)
-                                } header: {
-                                    HStack {
-                                        Text(section.title)
-                                            .font(.headline)
-                                            .fontWeight(.bold)
-                                        Spacer()
-                                        Text("\(section.items.count) éléments")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    .padding(.horizontal)
-                                    .padding(.vertical, 10)
-                                    .background(Color(.systemBackground).opacity(0.95))
-                                }
+                        LazyVStack(spacing: 12) {
+                            ForEach(timelineSections) { period in
+                                TimelinePeriodCard(
+                                    period: period,
+                                    groupBy: groupBy,
+                                    onTap: { selectedPeriod = period }
+                                )
                             }
                         }
+                        .padding()
                     }
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
             .onChange(of: groupBy) { _ in loadTimeline() }
-            .onChange(of: mediaFilter) { _ in loadTimeline() }
             .onAppear { loadTimeline() }
+            .fullScreenCover(item: $selectedPeriod) { period in
+                TimelinePeriodDetailView(
+                    period: period,
+                    groupBy: groupBy,
+                    viewModel: viewModel
+                )
+            }
         }
     }
 
@@ -535,132 +471,327 @@ struct TimelineTabView: View {
             // Remove duplicates by ID
             var seen = Set<String>()
             allItems = allItems.filter { item in
-                if seen.contains(item.id) {
-                    return false
-                }
+                if seen.contains(item.id) { return false }
                 seen.insert(item.id)
                 return true
             }
 
-            // Filter by media type
-            switch mediaFilter {
-            case .all:
-                break
-            case .photos:
-                allItems = allItems.filter { $0.asset.mediaType == .image && !isScreenshot($0.asset) }
-            case .videos:
-                allItems = allItems.filter { $0.asset.mediaType == .video }
-            case .screenshots:
-                allItems = allItems.filter { isScreenshot($0.asset) }
-            }
-
             // Group by date
-            let grouped = Dictionary(grouping: allItems) { item -> String in
+            let calendar = Calendar.current
+            let grouped = Dictionary(grouping: allItems) { item -> DateComponents in
                 let date = item.asset.creationDate ?? Date()
-                let formatter = DateFormatter()
-                formatter.locale = Locale(identifier: "fr_FR")
                 if groupBy == .month {
-                    formatter.dateFormat = "MMMM yyyy"
+                    return calendar.dateComponents([.year, .month], from: date)
                 } else {
-                    formatter.dateFormat = "yyyy"
+                    return calendar.dateComponents([.year], from: date)
                 }
-                return formatter.string(from: date)
             }
 
-            // Convert to sections and sort
-            var sections: [TimelineSection] = []
+            // Convert to TimelinePeriod
+            var periods: [TimelinePeriod] = []
             let dateFormatter = DateFormatter()
             dateFormatter.locale = Locale(identifier: "fr_FR")
-            if groupBy == .month {
-                dateFormatter.dateFormat = "MMMM yyyy"
-            } else {
-                dateFormatter.dateFormat = "yyyy"
-            }
 
-            for (title, items) in grouped {
-                let date = dateFormatter.date(from: title) ?? Date()
+            for (components, items) in grouped {
+                var date = calendar.date(from: components) ?? Date()
+                let title: String
+                let subtitle: String
+
+                if groupBy == .month {
+                    dateFormatter.dateFormat = "MMMM"
+                    title = dateFormatter.string(from: date).capitalized
+                    dateFormatter.dateFormat = "yyyy"
+                    subtitle = dateFormatter.string(from: date)
+                } else {
+                    dateFormatter.dateFormat = "yyyy"
+                    title = dateFormatter.string(from: date)
+                    subtitle = ""
+                }
+
                 let sortedItems = items.sorted { ($0.asset.creationDate ?? Date()) > ($1.asset.creationDate ?? Date()) }
-                sections.append(TimelineSection(title: title.capitalized, date: date, items: sortedItems))
+                let photoCount = sortedItems.filter { $0.asset.mediaType == .image }.count
+                let videoCount = sortedItems.filter { $0.asset.mediaType == .video }.count
+
+                periods.append(TimelinePeriod(
+                    title: title,
+                    subtitle: subtitle,
+                    date: date,
+                    items: sortedItems,
+                    photoCount: photoCount,
+                    videoCount: videoCount
+                ))
             }
 
-            sections.sort { $0.date > $1.date }
+            periods.sort { $0.date > $1.date }
 
             await MainActor.run {
-                timelineData = sections
+                timelineSections = periods
                 isLoading = false
             }
         }
     }
+}
 
-    private func isScreenshot(_ asset: PHAsset) -> Bool {
-        if asset.mediaSubtypes.contains(.photoScreenshot) {
-            return true
-        }
-        let width = asset.pixelWidth
-        let height = asset.pixelHeight
-        let screenScales: [(Int, Int)] = [
-            (1170, 2532), (1284, 2778), (1179, 2556), (1290, 2796),
-            (1125, 2436), (828, 1792), (1080, 1920), (750, 1334),
-            (1242, 2688), (1242, 2208)
-        ]
-        return screenScales.contains { $0.0 == width && $0.1 == height }
+// MARK: - Timeline Period Model
+
+struct TimelinePeriod: Identifiable {
+    let id = UUID()
+    let title: String
+    let subtitle: String
+    let date: Date
+    let items: [MediaItem]
+    let photoCount: Int
+    let videoCount: Int
+
+    var totalSize: Int64 {
+        items.reduce(0) { $0 + $1.fileSize }
     }
 }
 
-struct TimelineThumbnailView: View {
-    let item: MediaItem
-    @State private var thumbnail: UIImage?
+// MARK: - Timeline Period Card
+
+struct TimelinePeriodCard: View {
+    let period: TimelinePeriod
+    let groupBy: TimelineTabView.TimelineGrouping
+    let onTap: () -> Void
+
+    @State private var previewImages: [UIImage] = []
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                if let thumbnail = thumbnail ?? item.thumbnail {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: geo.size.width, height: geo.size.width)
-                        .clipped()
-                } else {
-                    Rectangle()
-                        .fill(Color(.systemGray5))
-                }
-
-                // Video indicator
-                if item.asset.mediaType == .video {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 10))
-                            Text(formatDuration(item.asset.duration))
-                                .font(.system(size: 10, weight: .medium))
+        Button(action: onTap) {
+            VStack(spacing: 0) {
+                // Preview images grid
+                HStack(spacing: 2) {
+                    ForEach(0..<min(4, period.items.count), id: \.self) { index in
+                        if index < previewImages.count {
+                            Image(uiImage: previewImages[index])
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(maxWidth: .infinity)
+                                .aspectRatio(1, contentMode: .fit)
+                                .clipped()
+                        } else {
+                            Rectangle()
+                                .fill(Color(.systemGray5))
+                                .aspectRatio(1, contentMode: .fit)
                         }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.black.opacity(0.6))
-                        .cornerRadius(4)
-                        .padding(4)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    // Fill remaining slots if less than 4 items
+                    if period.items.count < 4 {
+                        ForEach(period.items.count..<4, id: \.self) { _ in
+                            Rectangle()
+                                .fill(Color(.systemGray6))
+                                .aspectRatio(1, contentMode: .fit)
+                        }
+                    }
                 }
+                .frame(height: 90)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                // Info bar
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(period.title)
+                                .font(.headline)
+                                .fontWeight(.bold)
+                            if !period.subtitle.isEmpty {
+                                Text(period.subtitle)
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        HStack(spacing: 12) {
+                            if period.photoCount > 0 {
+                                Label("\(period.photoCount)", systemImage: "photo")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            if period.videoCount > 0 {
+                                Label("\(period.videoCount)", systemImage: "video")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Text(ByteCountFormatter.string(fromByteCount: period.totalSize, countStyle: .file))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 4)
+                .padding(.top, 10)
             }
+            .padding(12)
+            .background(Color(.systemBackground))
+            .cornerRadius(16)
+            .shadow(color: .black.opacity(0.05), radius: 8, y: 2)
         }
-        .aspectRatio(1, contentMode: .fit)
+        .buttonStyle(.plain)
         .onAppear {
-            loadThumbnail()
+            loadPreviews()
         }
     }
 
-    private func loadThumbnail() {
-        if item.thumbnail == nil {
-            Task {
-                let image = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .detail)
+    private func loadPreviews() {
+        let itemsToLoad = Array(period.items.prefix(4))
+        Task {
+            var images: [UIImage] = []
+            for item in itemsToLoad {
+                if let thumbnail = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .preview) {
+                    images.append(thumbnail)
+                }
+            }
+            await MainActor.run {
+                previewImages = images
+            }
+        }
+    }
+}
+
+// MARK: - Timeline Period Detail View
+
+struct TimelinePeriodDetailView: View {
+    let period: TimelinePeriod
+    let groupBy: TimelineTabView.TimelineGrouping
+    @ObservedObject var viewModel: CleanerViewModel
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedPhotoIndex: Int?
+    @State private var showSwipeMode = false
+    @State private var loadedThumbnails: [String: UIImage] = [:]
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2)
+    ]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(Array(period.items.enumerated()), id: \.element.id) { index, item in
+                        TimelineGridCell(
+                            item: item,
+                            thumbnail: loadedThumbnails[item.id],
+                            onTap: { selectedPhotoIndex = index },
+                            onAppear: { loadThumbnailIfNeeded(for: item) }
+                        )
+                    }
+                }
+                .padding(2)
+            }
+            .navigationTitle("\(period.title) \(period.subtitle)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: { dismiss() }) {
+                        Image(systemName: "xmark")
+                            .fontWeight(.semibold)
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: { showSwipeMode = true }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "hand.draw")
+                            Text("Trier")
+                        }
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    }
+                }
+            }
+            .fullScreenCover(item: $selectedPhotoIndex) { index in
+                PhotoViewerView(
+                    items: period.items,
+                    initialIndex: index,
+                    onDismiss: { selectedPhotoIndex = nil }
+                )
+            }
+            .fullScreenCover(isPresented: $showSwipeMode) {
+                TimelineSwipeModeView(
+                    period: period,
+                    viewModel: viewModel,
+                    onDismiss: { showSwipeMode = false }
+                )
+            }
+        }
+    }
+
+    private func loadThumbnailIfNeeded(for item: MediaItem) {
+        guard loadedThumbnails[item.id] == nil else { return }
+        Task {
+            if let thumbnail = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .detail) {
                 await MainActor.run {
-                    thumbnail = image
+                    loadedThumbnails[item.id] = thumbnail
                 }
             }
         }
+    }
+}
+
+// MARK: - Timeline Grid Cell
+
+struct TimelineGridCell: View {
+    let item: MediaItem
+    let thumbnail: UIImage?
+    let onTap: () -> Void
+    let onAppear: () -> Void
+
+    private var isVideo: Bool { item.asset.mediaType == .video }
+
+    var body: some View {
+        Button(action: onTap) {
+            GeometryReader { geo in
+                ZStack {
+                    if let thumbnail = thumbnail ?? item.thumbnail {
+                        Image(uiImage: thumbnail)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: geo.size.width, height: geo.size.width)
+                            .clipped()
+                    } else {
+                        Rectangle()
+                            .fill(Color(.systemGray5))
+                            .overlay(ProgressView().scaleEffect(0.7))
+                    }
+
+                    // Video indicator
+                    if isVideo {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "play.fill")
+                                        .font(.system(size: 8))
+                                    Text(formatDuration(item.asset.duration))
+                                        .font(.system(size: 10, weight: .medium))
+                                }
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.black.opacity(0.6))
+                                .cornerRadius(4)
+                                .padding(4)
+                                Spacer()
+                            }
+                        }
+                    }
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+        }
+        .buttonStyle(.plain)
+        .onAppear { onAppear() }
     }
 
     private func formatDuration(_ duration: TimeInterval) -> String {
@@ -668,6 +799,626 @@ struct TimelineThumbnailView: View {
         let seconds = Int(duration) % 60
         return String(format: "%d:%02d", minutes, seconds)
     }
+}
+
+// MARK: - Photo Viewer (Full Screen with Swipe)
+
+struct PhotoViewerView: View {
+    let items: [MediaItem]
+    let initialIndex: Int
+    let onDismiss: () -> Void
+
+    @State private var currentIndex: Int
+    @State private var loadedImages: [String: UIImage] = [:]
+    @State private var dragOffset: CGSize = .zero
+    @State private var scale: CGFloat = 1.0
+    @GestureState private var magnifyBy: CGFloat = 1.0
+
+    init(items: [MediaItem], initialIndex: Int, onDismiss: @escaping () -> Void) {
+        self.items = items
+        self.initialIndex = initialIndex
+        self.onDismiss = onDismiss
+        self._currentIndex = State(initialValue: initialIndex)
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            // Photo pager
+            TabView(selection: $currentIndex) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    PhotoViewerPage(
+                        item: item,
+                        image: loadedImages[item.id],
+                        onLoadRequest: { loadImage(for: item) }
+                    )
+                    .tag(index)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .ignoresSafeArea()
+
+            // Overlay UI
+            VStack {
+                // Header
+                HStack {
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark")
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.white)
+                            .padding(12)
+                            .background(Color.black.opacity(0.5))
+                            .clipShape(Circle())
+                    }
+
+                    Spacer()
+
+                    Text("\(currentIndex + 1) / \(items.count)")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.5))
+                        .cornerRadius(20)
+
+                    Spacer()
+
+                    // Spacer for symmetry
+                    Color.clear
+                        .frame(width: 44, height: 44)
+                }
+                .padding()
+
+                Spacer()
+
+                // Footer info
+                if currentIndex < items.count {
+                    let item = items[currentIndex]
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let date = item.asset.creationDate {
+                                Text(date, style: .date)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                Text(date, style: .time)
+                                    .font(.caption)
+                            }
+                        }
+                        Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: item.fileSize, countStyle: .file))
+                            .font(.caption)
+                    }
+                    .foregroundColor(.white)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: [.clear, .black.opacity(0.7)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                }
+            }
+        }
+        .onChange(of: currentIndex) { _ in
+            preloadAdjacentImages()
+        }
+        .onAppear {
+            loadImage(for: items[currentIndex])
+            preloadAdjacentImages()
+        }
+    }
+
+    private func loadImage(for item: MediaItem) {
+        guard loadedImages[item.id] == nil else { return }
+        Task {
+            if let image = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
+                await MainActor.run {
+                    loadedImages[item.id] = image
+                }
+            }
+        }
+    }
+
+    private func preloadAdjacentImages() {
+        let indicesToLoad = [currentIndex - 1, currentIndex, currentIndex + 1]
+            .filter { $0 >= 0 && $0 < items.count }
+
+        for index in indicesToLoad {
+            loadImage(for: items[index])
+        }
+
+        // Cleanup distant images to save memory
+        let keepIndices = Set((max(0, currentIndex - 2)...min(items.count - 1, currentIndex + 2)))
+        let keepIds = Set(keepIndices.map { items[$0].id })
+        loadedImages = loadedImages.filter { keepIds.contains($0.key) }
+    }
+}
+
+struct PhotoViewerPage: View {
+    let item: MediaItem
+    let image: UIImage?
+    let onLoadRequest: () -> Void
+
+    @State private var scale: CGFloat = 1.0
+    @GestureState private var magnifyBy: CGFloat = 1.0
+
+    var body: some View {
+        GeometryReader { geo in
+            if let image = image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .scaleEffect(scale * magnifyBy)
+                    .gesture(
+                        MagnificationGesture()
+                            .updating($magnifyBy) { value, state, _ in
+                                state = value
+                            }
+                            .onEnded { value in
+                                scale = max(1, min(scale * value, 4))
+                            }
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(.spring()) {
+                            scale = scale > 1 ? 1 : 2
+                        }
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height)
+            } else if let thumbnail = item.thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .overlay(ProgressView().scaleEffect(1.5))
+            } else {
+                ProgressView()
+                    .scaleEffect(1.5)
+                    .frame(width: geo.size.width, height: geo.size.height)
+            }
+        }
+        .onAppear { onLoadRequest() }
+    }
+}
+
+// MARK: - Timeline Swipe Mode View
+
+struct TimelineSwipeModeView: View {
+    let period: TimelinePeriod
+    @ObservedObject var viewModel: CleanerViewModel
+    let onDismiss: () -> Void
+
+    @State private var currentIndex = 0
+    @State private var offset: CGSize = .zero
+    @State private var toKeep: [MediaItem] = []
+    @State private var toDelete: [MediaItem] = []
+    @State private var hdImage: UIImage?
+    @State private var loadedThumbnails: [String: UIImage] = [:]
+    @State private var hdLoadTask: Task<Void, Never>?
+    @State private var showResults = false
+
+    var body: some View {
+        ZStack {
+            Color(.systemGroupedBackground).ignoresSafeArea()
+
+            if showResults {
+                // Results view
+                TimelineSwipeResultsView(
+                    periodTitle: "\(period.title) \(period.subtitle)",
+                    toKeep: toKeep,
+                    toDelete: toDelete,
+                    onDeleteConfirmed: deleteSelectedItems,
+                    onReset: resetSwipe,
+                    onDismiss: onDismiss
+                )
+            } else if currentIndex >= period.items.count {
+                // Finished - show results
+                Color.clear.onAppear { showResults = true }
+            } else {
+                VStack(spacing: 20) {
+                    // Header
+                    HStack {
+                        Button(action: onDismiss) {
+                            Image(systemName: "xmark")
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.primary)
+                                .padding(10)
+                                .background(Color(.systemGray5))
+                                .clipShape(Circle())
+                        }
+
+                        Spacer()
+
+                        VStack(spacing: 2) {
+                            Text("\(period.title) \(period.subtitle)")
+                                .font(.headline)
+                            Text("\(currentIndex + 1) / \(period.items.count)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        Button(action: { showResults = true }) {
+                            Text("Terminer")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.blue)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color(.systemGray5))
+                                .cornerRadius(20)
+                        }
+                    }
+                    .padding(.horizontal)
+
+                    // Stats
+                    HStack(spacing: 20) {
+                        Label("\(toDelete.count)", systemImage: "trash")
+                            .font(.subheadline)
+                            .foregroundColor(.red)
+                        Label("\(toKeep.count)", systemImage: "heart.fill")
+                            .font(.subheadline)
+                            .foregroundColor(.green)
+                    }
+
+                    // Card
+                    ZStack {
+                        // Background cards
+                        ForEach(0..<min(2, period.items.count - currentIndex - 1), id: \.self) { i in
+                            let index = currentIndex + i + 1
+                            if index < period.items.count {
+                                SwipeCardBackground(
+                                    item: period.items[index],
+                                    thumbnail: getThumbnail(for: period.items[index]),
+                                    offset: CGFloat(i)
+                                )
+                            }
+                        }
+
+                        // Current card
+                        SwipeCard(
+                            item: period.items[currentIndex],
+                            thumbnail: getThumbnail(for: period.items[currentIndex]),
+                            hdImage: hdImage,
+                            offset: offset,
+                            onSwipe: handleSwipe
+                        )
+                        .offset(offset)
+                        .rotationEffect(.degrees(Double(offset.width / 20)))
+                        .gesture(
+                            DragGesture()
+                                .onChanged { gesture in
+                                    offset = gesture.translation
+                                }
+                                .onEnded { gesture in
+                                    handleGestureEnd(gesture)
+                                }
+                        )
+                    }
+                    .padding(.horizontal)
+
+                    // Action buttons
+                    HStack(spacing: 30) {
+                        Button(action: swipeLeft) {
+                            Image(systemName: "xmark")
+                                .font(.title)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                                .frame(width: 65, height: 65)
+                                .background(Color.red)
+                                .clipShape(Circle())
+                                .shadow(color: .red.opacity(0.3), radius: 10, y: 5)
+                        }
+
+                        Button(action: undoSwipe) {
+                            Image(systemName: "arrow.uturn.backward")
+                                .font(.title2)
+                                .foregroundColor(.orange)
+                                .frame(width: 50, height: 50)
+                                .background(Color(.systemBackground))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.1), radius: 5, y: 2)
+                        }
+                        .disabled(currentIndex == 0)
+                        .opacity(currentIndex == 0 ? 0.4 : 1)
+
+                        Button(action: swipeRight) {
+                            Image(systemName: "heart.fill")
+                                .font(.title)
+                                .foregroundColor(.white)
+                                .frame(width: 65, height: 65)
+                                .background(Color.green)
+                                .clipShape(Circle())
+                                .shadow(color: .green.opacity(0.3), radius: 10, y: 5)
+                        }
+                    }
+                    .padding(.bottom, 20)
+
+                    // Instructions
+                    HStack(spacing: 30) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.left")
+                            Text("Supprimer")
+                        }
+                        .font(.caption)
+                        .foregroundColor(.red)
+
+                        HStack(spacing: 4) {
+                            Text("Garder")
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.caption)
+                        .foregroundColor(.green)
+                    }
+                    .padding(.bottom, 10)
+                }
+            }
+        }
+        .onAppear {
+            loadVisibleItems()
+        }
+        .onChange(of: currentIndex) { _ in
+            loadVisibleItems()
+        }
+        .onDisappear {
+            hdLoadTask?.cancel()
+        }
+    }
+
+    private func getThumbnail(for item: MediaItem) -> UIImage? {
+        return item.thumbnail ?? loadedThumbnails[item.id]
+    }
+
+    private func loadVisibleItems() {
+        hdImage = nil
+        let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex + 2]
+            .filter { $0 >= 0 && $0 < period.items.count }
+
+        for index in indicesToLoad {
+            let item = period.items[index]
+            if item.thumbnail == nil && loadedThumbnails[item.id] == nil {
+                Task {
+                    if let thumb = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .detail) {
+                        await MainActor.run {
+                            loadedThumbnails[item.id] = thumb
+                        }
+                    }
+                }
+            }
+        }
+
+        loadHDForCurrentItem()
+    }
+
+    private func loadHDForCurrentItem() {
+        hdLoadTask?.cancel()
+        guard currentIndex < period.items.count else { return }
+        let item = period.items[currentIndex]
+        guard item.asset.mediaType == .image else {
+            hdImage = nil
+            return
+        }
+
+        let itemId = item.id
+        hdLoadTask = Task {
+            if let image = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
+                if !Task.isCancelled {
+                    await MainActor.run {
+                        if currentIndex < period.items.count && period.items[currentIndex].id == itemId {
+                            hdImage = image
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleGestureEnd(_ gesture: DragGesture.Value) {
+        let threshold: CGFloat = 100
+        if gesture.translation.width > threshold {
+            swipeRight()
+        } else if gesture.translation.width < -threshold {
+            swipeLeft()
+        } else {
+            withAnimation(.spring()) { offset = .zero }
+        }
+    }
+
+    private func handleSwipe(_ direction: SwipeDirection) {
+        if direction == .left { swipeLeft() } else { swipeRight() }
+    }
+
+    private func swipeLeft() {
+        withAnimation(.spring()) { offset = CGSize(width: -500, height: 0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            if currentIndex < period.items.count {
+                toDelete.append(period.items[currentIndex])
+                currentIndex += 1
+                offset = .zero
+            }
+        }
+    }
+
+    private func swipeRight() {
+        withAnimation(.spring()) { offset = CGSize(width: 500, height: 0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            if currentIndex < period.items.count {
+                toKeep.append(period.items[currentIndex])
+                currentIndex += 1
+                offset = .zero
+            }
+        }
+    }
+
+    private func undoSwipe() {
+        guard currentIndex > 0 else { return }
+        currentIndex -= 1
+        let item = period.items[currentIndex]
+        toKeep.removeAll { $0.id == item.id }
+        toDelete.removeAll { $0.id == item.id }
+        offset = .zero
+    }
+
+    private func resetSwipe() {
+        currentIndex = 0
+        toKeep = []
+        toDelete = []
+        hdImage = nil
+        showResults = false
+    }
+
+    private func deleteSelectedItems() {
+        Task {
+            let _ = await viewModel.deleteItems(toDelete)
+            await MainActor.run {
+                onDismiss()
+            }
+        }
+    }
+}
+
+// MARK: - Timeline Swipe Results View
+
+struct TimelineSwipeResultsView: View {
+    let periodTitle: String
+    let toKeep: [MediaItem]
+    let toDelete: [MediaItem]
+    let onDeleteConfirmed: () -> Void
+    let onReset: () -> Void
+    let onDismiss: () -> Void
+
+    @State private var isDeleting = false
+
+    var totalSizeToDelete: Int64 {
+        toDelete.reduce(0) { $0 + $1.fileSize }
+    }
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 70))
+                .foregroundColor(.green)
+
+            Text("Tri terminé !")
+                .font(.title)
+                .fontWeight(.bold)
+
+            Text(periodTitle)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+
+            VStack(spacing: 20) {
+                HStack(spacing: 40) {
+                    VStack(spacing: 8) {
+                        Text("\(toKeep.count)")
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(.green)
+                        HStack(spacing: 4) {
+                            Image(systemName: "heart.fill")
+                                .font(.caption)
+                            Text("Gardées")
+                                .font(.subheadline)
+                        }
+                        .foregroundColor(.secondary)
+                    }
+
+                    VStack(spacing: 8) {
+                        Text("\(toDelete.count)")
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(.red)
+                        HStack(spacing: 4) {
+                            Image(systemName: "trash.fill")
+                                .font(.caption)
+                            Text("À supprimer")
+                                .font(.subheadline)
+                        }
+                        .foregroundColor(.secondary)
+                    }
+                }
+
+                if !toDelete.isEmpty {
+                    VStack(spacing: 4) {
+                        Text(ByteCountFormatter.string(fromByteCount: totalSizeToDelete, countStyle: .file))
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.blue)
+                        Text("à libérer")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 8)
+                }
+            }
+            .padding(24)
+            .background(Color(.systemGray6))
+            .cornerRadius(20)
+
+            Spacer()
+
+            VStack(spacing: 12) {
+                if !toDelete.isEmpty {
+                    Button(action: {
+                        isDeleting = true
+                        onDeleteConfirmed()
+                    }) {
+                        HStack {
+                            if isDeleting {
+                                ProgressView().tint(.white)
+                            } else {
+                                Image(systemName: "trash.fill")
+                            }
+                            Text("Supprimer \(toDelete.count) éléments")
+                        }
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.red)
+                        .cornerRadius(14)
+                    }
+                    .disabled(isDeleting)
+                }
+
+                Button(action: onReset) {
+                    HStack {
+                        Image(systemName: "arrow.counterclockwise")
+                        Text("Recommencer")
+                    }
+                    .font(.headline)
+                    .foregroundColor(.blue)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color(.systemGray5))
+                    .cornerRadius(14)
+                }
+                .disabled(isDeleting)
+
+                Button(action: onDismiss) {
+                    Text("Fermer")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                }
+                .disabled(isDeleting)
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 30)
+        }
+        .padding()
+    }
+}
+
+// Extension for optional binding with index
+extension Int: @retroactive Identifiable {
+    public var id: Int { self }
 }
 
 // MARK: - Swipe Tab View
@@ -682,6 +1433,10 @@ struct SwipeTabView: View {
     @State private var toDelete: [MediaItem] = []
     @State private var hdImage: UIImage?
     @State private var loadedThumbnails: [String: UIImage] = [:] // Cache for visible thumbnails only
+    @State private var hdLoadTask: Task<Void, Never>?
+
+    // OPTIMIZATION: Limit items loaded at once for better performance
+    private let maxInitialItems = 500
 
     var body: some View {
         NavigationStack {
@@ -856,6 +1611,8 @@ struct SwipeTabView: View {
 
     private func loadAllMedia() {
         isLoading = true
+        hdLoadTask?.cancel()
+
         Task {
             var items: [MediaItem] = []
 
@@ -884,8 +1641,11 @@ struct SwipeTabView: View {
                 return date1 > date2
             }
 
+            // OPTIMIZATION: Limit initial load for better performance
+            let limitedItems = Array(items.prefix(maxInitialItems))
+
             await MainActor.run {
-                allMedia = items
+                allMedia = limitedItems
                 isLoading = false
                 loadVisibleItems()
             }
@@ -920,6 +1680,8 @@ struct SwipeTabView: View {
     }
 
     private func loadHDForCurrentItem() {
+        hdLoadTask?.cancel()
+
         guard currentIndex < allMedia.count else { return }
         let item = allMedia[currentIndex]
         guard item.asset.mediaType == .image else {
@@ -927,11 +1689,15 @@ struct SwipeTabView: View {
             return
         }
 
-        Task {
+        let itemId = item.id
+        hdLoadTask = Task {
             if let image = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
-                await MainActor.run {
-                    if currentIndex < allMedia.count && allMedia[currentIndex].id == item.id {
-                        hdImage = image
+                if !Task.isCancelled {
+                    await MainActor.run {
+                        // Double check we're still on the same item
+                        if currentIndex < allMedia.count && allMedia[currentIndex].id == itemId {
+                            hdImage = image
+                        }
                     }
                 }
             }
@@ -1009,11 +1775,13 @@ struct SwipeTabView: View {
     }
 
     private func resetSwipe() {
+        hdLoadTask?.cancel()
         currentIndex = 0
         toKeep = []
         toDelete = []
         hdImage = nil
-        loadedThumbnails = [:]
+        loadedThumbnails.removeAll()
+        allMedia.removeAll()
         loadAllMedia()
     }
 

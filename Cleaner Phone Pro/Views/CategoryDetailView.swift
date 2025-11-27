@@ -13,6 +13,9 @@ struct CategoryDetailView: View {
     @State private var selectedItems: Set<MediaItem> = []
     @State private var isLoadingThumbnails = true
     @State private var showFullAccordion = false
+    @State private var loadedThumbnails: [String: UIImage] = [:] // Local thumbnail storage
+    @State private var visibleItemRange: Range<Int> = 0..<20 // Track visible items
+    @State private var thumbnailLoadTask: Task<Void, Never>?
     @Environment(\.dismiss) private var dismiss
 
     /// Get the current category data from the viewModel (to get updated thumbnails)
@@ -83,10 +86,54 @@ struct CategoryDetailView: View {
             }
         }
         .task {
-            // Load thumbnails when entering the view
-            await viewModel.loadThumbnailsForCategory(categoryData.category)
+            // OPTIMIZATION: Load only initial visible thumbnails, not all
+            await loadInitialThumbnails()
             isLoadingThumbnails = false
         }
+        .onDisappear {
+            thumbnailLoadTask?.cancel()
+            loadedThumbnails.removeAll() // Free memory
+        }
+    }
+
+    // OPTIMIZATION: Load thumbnails progressively instead of all at once
+    private func loadInitialThumbnails() async {
+        if categoryData.category.hasSimilarGroups {
+            // For similar groups, load first group's thumbnails
+            await viewModel.loadThumbnailsForCategory(categoryData.category)
+        } else {
+            // For regular grid, load only first ~30 items
+            let items = currentCategoryData.items
+            let initialCount = min(30, items.count)
+            let initialItems = Array(items.prefix(initialCount))
+
+            let loadedItems = await PhotoLibraryService.shared.loadThumbnailsBatch(for: initialItems, quality: .detail)
+            for (index, item) in loadedItems.enumerated() where index < initialCount {
+                if let thumbnail = item.thumbnail {
+                    loadedThumbnails[item.id] = thumbnail
+                }
+            }
+        }
+    }
+
+    // Called when scroll position changes to load more thumbnails
+    private func loadThumbnailsForVisibleRange(_ range: Range<Int>) {
+        thumbnailLoadTask?.cancel()
+        thumbnailLoadTask = Task {
+            await PhotoLibraryService.shared.loadThumbnailsProgressive(
+                for: currentCategoryData.items,
+                visibleRange: range,
+                quality: .detail
+            ) { index, thumbnail in
+                let item = currentCategoryData.items[index]
+                loadedThumbnails[item.id] = thumbnail
+            }
+        }
+    }
+
+    // Helper to get thumbnail for an item
+    private func getThumbnail(for item: MediaItem) -> UIImage? {
+        return item.thumbnail ?? loadedThumbnails[item.id]
     }
 
     private var loadingThumbnailsOverlay: some View {
@@ -129,15 +176,33 @@ struct CategoryDetailView: View {
                 GridItem(.flexible(), spacing: 2),
                 GridItem(.flexible(), spacing: 2)
             ], spacing: 2) {
-                ForEach(currentCategoryData.items) { item in
-                    SelectablePhotoCell(
+                ForEach(Array(currentCategoryData.items.enumerated()), id: \.element.id) { index, item in
+                    LazyThumbnailCell(
                         item: item,
+                        thumbnail: getThumbnail(for: item),
                         isSelected: selectedItems.contains(item),
-                        onSelect: { toggleSelection(item) }
+                        onSelect: { toggleSelection(item) },
+                        onAppear: {
+                            // Load thumbnail on demand when cell appears
+                            if getThumbnail(for: item) == nil {
+                                loadThumbnailOnDemand(for: item, at: index)
+                            }
+                        }
                     )
                 }
             }
             .padding(2)
+        }
+    }
+
+    // Load single thumbnail on demand
+    private func loadThumbnailOnDemand(for item: MediaItem, at index: Int) {
+        Task {
+            if let thumbnail = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .detail) {
+                await MainActor.run {
+                    loadedThumbnails[item.id] = thumbnail
+                }
+            }
         }
     }
 
@@ -219,6 +284,44 @@ struct SimilarGroupView: View {
     }
 }
 
+// MARK: - LRU Cache for HD Images (optimized memory management)
+
+@MainActor
+final class HDImageCache: ObservableObject {
+    static let shared = HDImageCache()
+
+    private var cache: [String: UIImage] = [:]
+    private var accessOrder: [String] = []
+    private let maxSize = 8 // Keep only 8 HD images in memory max
+
+    func get(_ id: String) -> UIImage? {
+        if let image = cache[id] {
+            // Move to end (most recently used)
+            accessOrder.removeAll { $0 == id }
+            accessOrder.append(id)
+            return image
+        }
+        return nil
+    }
+
+    func set(_ image: UIImage, for id: String) {
+        // Evict oldest if at capacity
+        while cache.count >= maxSize && !accessOrder.isEmpty {
+            let oldest = accessOrder.removeFirst()
+            cache.removeValue(forKey: oldest)
+        }
+
+        cache[id] = image
+        accessOrder.removeAll { $0 == id }
+        accessOrder.append(id)
+    }
+
+    func clear() {
+        cache.removeAll()
+        accessOrder.removeAll()
+    }
+}
+
 // MARK: - Vertical Accordion View
 
 struct VerticalAccordionView: View {
@@ -227,11 +330,24 @@ struct VerticalAccordionView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var currentIndex: Int = 0
     @State private var dragOffset: CGFloat = 0
-    @State private var hdImages: [String: UIImage] = [:] // Cache des images HD par ID
+    @StateObject private var hdCache = HDImageCache()
+    @State private var localHDImages: [String: UIImage] = [:] // Local cache for current session
     @State private var isPlayingVideo = false
     @State private var videoPlayer: AVPlayer?
     @StateObject private var videoLoader = VideoLoader()
     @State private var hdLoadTask: Task<Void, Never>?
+
+    // OPTIMIZATION: Only render items within visible window (±2 from current)
+    private var visibleIndices: [Int] {
+        let start = max(0, currentIndex - 2)
+        let end = min(group.items.count - 1, currentIndex + 2)
+        guard start <= end else { return [] }
+        return Array(start...end)
+    }
+
+    private func getHDImage(for id: String) -> UIImage? {
+        return localHDImages[id] ?? hdCache.get(id)
+    }
 
     var body: some View {
         ZStack {
@@ -239,10 +355,12 @@ struct VerticalAccordionView: View {
 
             GeometryReader { geometry in
                 ZStack {
-                    ForEach(Array(group.items.enumerated().reversed()), id: \.element.id) { index, item in
+                    // OPTIMIZATION: Only create views for visible items (5 max instead of ALL)
+                    ForEach(visibleIndices.reversed(), id: \.self) { index in
+                        let item = group.items[index]
                         VerticalAccordionCard(
                             item: item,
-                            highQualityImage: hdImages[item.id],
+                            highQualityImage: getHDImage(for: item.id),
                             isSelected: selectedItems.contains(item),
                             index: index,
                             currentIndex: currentIndex,
@@ -420,6 +538,7 @@ struct VerticalAccordionView: View {
         }
         .onChange(of: currentIndex) { _ in
             startHDPreloading()
+            cleanupDistantImages()
         }
         .onChange(of: videoLoader.state) { newState in
             if case .ready(let playerItem) = newState {
@@ -432,15 +551,16 @@ struct VerticalAccordionView: View {
         .onDisappear {
             stopVideo()
             hdLoadTask?.cancel()
+            localHDImages.removeAll() // Free memory on dismiss
         }
     }
 
-    // MARK: - HD Preloading
+    // MARK: - HD Preloading (Optimized)
 
     private func startHDPreloading() {
         hdLoadTask?.cancel()
         hdLoadTask = Task {
-            // Preload current, next and previous items
+            // Only preload current and immediate neighbors (3 images max)
             let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex - 1]
                 .filter { $0 >= 0 && $0 < group.items.count }
 
@@ -448,21 +568,30 @@ struct VerticalAccordionView: View {
                 let item = group.items[index]
 
                 // Skip if already loaded or if it's a video
-                if hdImages[item.id] != nil || item.asset.mediaType == .video {
+                if localHDImages[item.id] != nil || hdCache.get(item.id) != nil || item.asset.mediaType == .video {
                     continue
                 }
 
                 // Check if task was cancelled
                 if Task.isCancelled { break }
 
-                // Load HD image
+                // Load HD image with priority for current index
                 if let hdImage = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
                     if !Task.isCancelled {
-                        hdImages[item.id] = hdImage
+                        localHDImages[item.id] = hdImage
+                        hdCache.set(hdImage, for: item.id)
                     }
                 }
             }
         }
+    }
+
+    // OPTIMIZATION: Remove HD images that are far from current view to free memory
+    private func cleanupDistantImages() {
+        let keepIndices = Set((max(0, currentIndex - 3)...min(group.items.count - 1, currentIndex + 3)))
+        let keepIds = Set(keepIndices.map { group.items[$0].id })
+
+        localHDImages = localHDImages.filter { keepIds.contains($0.key) }
     }
 
     private var isVideoLoading: Bool {
@@ -502,11 +631,24 @@ struct ItemsAccordionView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var currentIndex: Int = 0
     @State private var dragOffset: CGFloat = 0
-    @State private var hdImages: [String: UIImage] = [:] // Cache des images HD par ID
+    @StateObject private var hdCache = HDImageCache()
+    @State private var localHDImages: [String: UIImage] = [:] // Local cache for current session
     @State private var isPlayingVideo = false
     @State private var videoPlayer: AVPlayer?
     @StateObject private var videoLoader = VideoLoader()
     @State private var hdLoadTask: Task<Void, Never>?
+
+    // OPTIMIZATION: Only render items within visible window (±2 from current)
+    private var visibleIndices: [Int] {
+        let start = max(0, currentIndex - 2)
+        let end = min(items.count - 1, currentIndex + 2)
+        guard start <= end else { return [] }
+        return Array(start...end)
+    }
+
+    private func getHDImage(for id: String) -> UIImage? {
+        return localHDImages[id] ?? hdCache.get(id)
+    }
 
     var body: some View {
         ZStack {
@@ -514,10 +656,12 @@ struct ItemsAccordionView: View {
 
             GeometryReader { geometry in
                 ZStack {
-                    ForEach(Array(items.enumerated().reversed()), id: \.element.id) { index, item in
+                    // OPTIMIZATION: Only create views for visible items (5 max instead of ALL)
+                    ForEach(visibleIndices.reversed(), id: \.self) { index in
+                        let item = items[index]
                         VerticalAccordionCard(
                             item: item,
-                            highQualityImage: hdImages[item.id],
+                            highQualityImage: getHDImage(for: item.id),
                             isSelected: selectedItems.contains(item),
                             index: index,
                             currentIndex: currentIndex,
@@ -695,6 +839,7 @@ struct ItemsAccordionView: View {
         }
         .onChange(of: currentIndex) { _ in
             startHDPreloading()
+            cleanupDistantImages()
         }
         .onChange(of: videoLoader.state) { newState in
             if case .ready(let playerItem) = newState {
@@ -707,15 +852,16 @@ struct ItemsAccordionView: View {
         .onDisappear {
             stopVideo()
             hdLoadTask?.cancel()
+            localHDImages.removeAll() // Free memory on dismiss
         }
     }
 
-    // MARK: - HD Preloading
+    // MARK: - HD Preloading (Optimized)
 
     private func startHDPreloading() {
         hdLoadTask?.cancel()
         hdLoadTask = Task {
-            // Preload current, next and previous items
+            // Only preload current and immediate neighbors (3 images max)
             let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex - 1]
                 .filter { $0 >= 0 && $0 < items.count }
 
@@ -723,7 +869,7 @@ struct ItemsAccordionView: View {
                 let item = items[index]
 
                 // Skip if already loaded or if it's a video
-                if hdImages[item.id] != nil || item.asset.mediaType == .video {
+                if localHDImages[item.id] != nil || hdCache.get(item.id) != nil || item.asset.mediaType == .video {
                     continue
                 }
 
@@ -733,11 +879,20 @@ struct ItemsAccordionView: View {
                 // Load HD image
                 if let hdImage = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
                     if !Task.isCancelled {
-                        hdImages[item.id] = hdImage
+                        localHDImages[item.id] = hdImage
+                        hdCache.set(hdImage, for: item.id)
                     }
                 }
             }
         }
+    }
+
+    // OPTIMIZATION: Remove HD images that are far from current view to free memory
+    private func cleanupDistantImages() {
+        let keepIndices = Set((max(0, currentIndex - 3)...min(items.count - 1, currentIndex + 3)))
+        let keepIds = Set(keepIndices.map { items[$0].id })
+
+        localHDImages = localHDImages.filter { keepIds.contains($0.key) }
     }
 
     private var isVideoLoading: Bool {
@@ -920,6 +1075,119 @@ struct VerticalAccordionCard: View {
 extension Collection {
     subscript(safe index: Index) -> Element? {
         return indices.contains(index) ? self[index] : nil
+    }
+}
+
+// OPTIMIZATION: Lazy loading cell with onAppear callback
+struct LazyThumbnailCell: View {
+    let item: MediaItem
+    let thumbnail: UIImage?
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onAppear: () -> Void
+
+    private var isVideo: Bool {
+        item.asset.mediaType == .video
+    }
+
+    private var videoDuration: String {
+        guard isVideo else { return "" }
+        let duration = item.asset.duration
+        let minutes = Int(duration) / 60
+        let seconds = Int(duration) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            // Photo/Video thumbnail - tap to select
+            if let thumbnail = thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(minWidth: 0, maxWidth: .infinity)
+                    .aspectRatio(1, contentMode: .fit)
+                    .clipped()
+            } else {
+                Rectangle()
+                    .fill(Color(.systemGray5))
+                    .aspectRatio(1, contentMode: .fit)
+                    .overlay(
+                        ProgressView()
+                            .scaleEffect(0.8)
+                    )
+            }
+
+            // Video indicator (top left)
+            if isVideo {
+                VStack {
+                    HStack {
+                        HStack(spacing: 3) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 8))
+                            Text(videoDuration)
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.7))
+                        .cornerRadius(4)
+                        .padding(4)
+
+                        Spacer()
+                    }
+                    Spacer()
+                }
+            }
+
+            // Selection indicator
+            ZStack {
+                Circle()
+                    .fill(isSelected ? Color.blue : Color.black.opacity(0.3))
+                    .frame(width: 26, height: 26)
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.caption)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
+                } else {
+                    Circle()
+                        .stroke(Color.white, lineWidth: 2)
+                        .frame(width: 24, height: 24)
+                }
+            }
+            .padding(6)
+
+            // File size label
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Text(ByteCountFormatter.string(fromByteCount: item.fileSize, countStyle: .file))
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(4)
+                        .padding(4)
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? Color.blue : Color.clear, lineWidth: 3)
+        )
+        .onTapGesture {
+            onSelect()
+        }
+        .onAppear {
+            onAppear()
+        }
     }
 }
 
