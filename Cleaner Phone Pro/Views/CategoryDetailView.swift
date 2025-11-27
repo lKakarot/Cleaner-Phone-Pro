@@ -37,6 +37,8 @@ struct CategoryDetailView: View {
         }
         .navigationTitle(categoryData.category.rawValue)
         .navigationBarTitleDisplayMode(.large)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarBackground(Color(.systemBackground), for: .navigationBar)
         .fullScreenCover(isPresented: $showFullAccordion) {
             ItemsAccordionView(items: currentCategoryData.items, selectedItems: $selectedItems)
         }

@@ -143,6 +143,8 @@ struct CleanerTabView: View {
                 }
             }
             .navigationTitle("Nettoyer")
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
             .toolbar {
                 if viewModel.diagnostics != nil {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -557,6 +559,8 @@ struct TimelineTabView: View {
                 }
             }
             .navigationTitle("Timeline")
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
             .onChange(of: groupBy) { _ in loadTimeline() }
             .onChange(of: mediaFilter) { _ in loadTimeline() }
             .onAppear { loadTimeline() }
@@ -883,6 +887,8 @@ struct SwipeTabView: View {
                 }
             }
             .navigationTitle("Trier")
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
             .toolbar {
                 if !isLoading && currentIndex < allMedia.count {
                     ToolbarItem(placement: .topBarTrailing) {
