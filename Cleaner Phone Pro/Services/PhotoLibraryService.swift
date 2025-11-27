@@ -255,12 +255,59 @@ final class VideoCache {
     }
 }
 
+// MARK: - Async Semaphore for concurrency limiting
+
+actor AsyncSemaphore {
+    private let limit: Int
+    private var count: Int = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    func wait() async {
+        if count < limit {
+            count += 1
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func signal() {
+        if let waiter = waiters.first {
+            waiters.removeFirst()
+            waiter.resume()
+        } else {
+            count -= 1
+        }
+    }
+}
+
 class PhotoLibraryService: ObservableObject {
     @Published var authorizationStatus: PHAuthorizationStatus = .notDetermined
 
     static let shared = PhotoLibraryService()
 
     private let imageManager = PHCachingImageManager()
+
+    // OPTIMIZATION: Semaphore to limit concurrent thumbnail loads
+    private let thumbnailSemaphore = AsyncSemaphore(limit: 6)
+
+    // OPTIMIZATION: Thumbnail cache to avoid reloading
+    private var thumbnailCache = NSCache<NSString, UIImage>()
+
+    private init() {
+        // Configure cache limits
+        thumbnailCache.countLimit = 200 // Max 200 thumbnails in memory
+        thumbnailCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB max
+
+        // Configure caching image manager
+        imageManager.allowsCachingHighQualityImages = false // Prefer speed
+    }
 
     func requestAuthorization() async -> PHAuthorizationStatus {
         let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
@@ -510,14 +557,37 @@ class PhotoLibraryService: ObservableObject {
         return updatedItems
     }
 
-    /// Load thumbnails for a batch of items (used in detail view)
+    /// Load thumbnails for a batch of items (used in detail view) - OPTIMIZED with concurrency limit
     func loadThumbnailsBatch(for items: [MediaItem], quality: ThumbnailQuality = .detail) async -> [MediaItem] {
-        await withTaskGroup(of: (Int, UIImage?).self) { group in
-            var updatedItems = items
+        var updatedItems = items
 
+        // OPTIMIZATION: Load in batches with limited concurrency
+        await withTaskGroup(of: (Int, UIImage?).self) { group in
             for (index, item) in items.enumerated() {
+                // Skip if already has thumbnail
+                if item.thumbnail != nil {
+                    continue
+                }
+
+                // Check cache first
+                let cacheKey = "\(item.id)_\(quality)" as NSString
+                if let cached = thumbnailCache.object(forKey: cacheKey) {
+                    updatedItems[index].thumbnail = cached
+                    continue
+                }
+
                 group.addTask {
+                    // Wait for semaphore before loading
+                    await self.thumbnailSemaphore.wait()
+                    defer { Task { await self.thumbnailSemaphore.signal() } }
+
                     let thumbnail = await self.loadThumbnail(for: item.asset, quality: quality)
+
+                    // Cache the result
+                    if let thumbnail = thumbnail {
+                        self.thumbnailCache.setObject(thumbnail, forKey: cacheKey)
+                    }
+
                     return (index, thumbnail)
                 }
             }
@@ -527,8 +597,53 @@ class PhotoLibraryService: ObservableObject {
                     updatedItems[index].thumbnail = thumbnail
                 }
             }
+        }
 
-            return updatedItems
+        return updatedItems
+    }
+
+    /// Load thumbnails progressively for visible items only - OPTIMIZED for large collections
+    func loadThumbnailsProgressive(
+        for items: [MediaItem],
+        visibleRange: Range<Int>,
+        quality: ThumbnailQuality = .detail,
+        onUpdate: @escaping (Int, UIImage) -> Void
+    ) async {
+        // Prioritize visible items + small buffer
+        let bufferSize = 10
+        let start = max(0, visibleRange.lowerBound - bufferSize)
+        let end = min(items.count, visibleRange.upperBound + bufferSize)
+
+        guard start < end else { return }
+
+        let indicesToLoad = Array(start..<end)
+
+        await withTaskGroup(of: Void.self) { group in
+            for index in indicesToLoad {
+                let item = items[index]
+
+                // Skip if already has thumbnail
+                if item.thumbnail != nil { continue }
+
+                // Check cache
+                let cacheKey = "\(item.id)_\(quality)" as NSString
+                if let cached = thumbnailCache.object(forKey: cacheKey) {
+                    onUpdate(index, cached)
+                    continue
+                }
+
+                group.addTask {
+                    await self.thumbnailSemaphore.wait()
+                    defer { Task { await self.thumbnailSemaphore.signal() } }
+
+                    if let thumbnail = await self.loadThumbnail(for: item.asset, quality: quality) {
+                        self.thumbnailCache.setObject(thumbnail, forKey: cacheKey)
+                        await MainActor.run {
+                            onUpdate(index, thumbnail)
+                        }
+                    }
+                }
+            }
         }
     }
 

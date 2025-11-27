@@ -19,7 +19,15 @@ class ImageHashService {
     // Taille plus grande pour aHash (meilleure précision)
     private let aHashSize = CGSize(width: 16, height: 16)
 
-    private init() {}
+    // OPTIMIZATION: Semaphore to limit concurrent hash computations
+    private let hashSemaphore = DispatchSemaphore(value: 4)
+
+    // OPTIMIZATION: Cache computed hashes
+    private var hashCache = NSCache<NSString, NSNumber>()
+
+    private init() {
+        hashCache.countLimit = 5000 // Cache up to 5000 hashes
+    }
 
     // MARK: - Calcul du dHash
 
@@ -76,21 +84,62 @@ class ImageHashService {
 
     // MARK: - Traitement par lot
 
-    /// Calcule les hashes pour un groupe d'items
+    /// Calcule les hashes pour un groupe d'items - OPTIMIZED with concurrency limit and batching
     func computeHashes(for items: [MediaItem], progress: ((Double) -> Void)? = nil) async -> [String: UInt64] {
         var hashes: [String: UInt64] = [:]
         let total = items.count
 
+        // Check cache first and filter items that need computation
+        var itemsToProcess: [(Int, MediaItem)] = []
         for (index, item) in items.enumerated() {
-            let hash = await computeHash(for: item.asset)
-            hashes[item.id] = hash
+            let cacheKey = item.id as NSString
+            if let cachedHash = hashCache.object(forKey: cacheKey) {
+                hashes[item.id] = cachedHash.uint64Value
+            } else {
+                itemsToProcess.append((index, item))
+            }
+        }
 
-            // Rapport de progression
+        // Process in batches of 8 for better performance
+        let batchSize = 8
+        let alreadyCachedCount = items.count - itemsToProcess.count
+
+        for (batchIndex, batchStart) in stride(from: 0, to: itemsToProcess.count, by: batchSize).enumerated() {
+            let batchEnd = min(batchStart + batchSize, itemsToProcess.count)
+            let batch = Array(itemsToProcess[batchStart..<batchEnd])
+
+            // Process batch in parallel with limited concurrency
+            let batchResults = await withTaskGroup(of: (String, UInt64).self, returning: [(String, UInt64)].self) { group in
+                for (_, item) in batch {
+                    group.addTask {
+                        let hash = await self.computeHash(for: item.asset)
+                        return (item.id, hash)
+                    }
+                }
+
+                var results: [(String, UInt64)] = []
+                for await result in group {
+                    results.append(result)
+                }
+                return results
+            }
+
+            // Update hashes and cache after batch completes
+            for (id, hash) in batchResults {
+                hashes[id] = hash
+                self.hashCache.setObject(NSNumber(value: hash), forKey: id as NSString)
+            }
+
+            // Report progress after each batch
+            let processedCount = alreadyCachedCount + batchEnd
             if let progress = progress {
                 await MainActor.run {
-                    progress(Double(index + 1) / Double(total))
+                    progress(Double(processedCount) / Double(total))
                 }
             }
+
+            // Small yield to prevent blocking main thread
+            await Task.yield()
         }
 
         return hashes
