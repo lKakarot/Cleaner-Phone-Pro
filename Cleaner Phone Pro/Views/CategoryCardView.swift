@@ -29,7 +29,8 @@ struct CategoryCardView: View {
                 BadgeView(
                     count: categoryData.items.count,
                     size: categoryData.formattedSize,
-                    color: categoryData.category.color
+                    color: categoryData.category.color,
+                    isVideo: categoryData.category.isVideo
                 )
             }
             
@@ -47,15 +48,23 @@ struct BadgeView: View {
     let count: Int
     let size: String
     let color: Color
-    
+    var isVideo: Bool = false
+
     var body: some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            Text("\(count)")
-                .font(.headline)
-                .fontWeight(.bold)
-            
-            Text(size)
+        HStack(spacing: 6) {
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(count) \(isVideo ? "vidéos" : "photos")")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+
+                Text(size)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Image(systemName: "chevron.right")
                 .font(.caption)
+                .fontWeight(.semibold)
                 .foregroundColor(.secondary)
         }
         .padding(.horizontal, 12)
@@ -69,28 +78,25 @@ struct PreviewImagesView: View {
     let items: [MediaItem]
 
     var body: some View {
-        GeometryReader { geometry in
-            let imageWidth = (geometry.size.width - 16) / 3
-
-            HStack(spacing: 8) {
-                ForEach(0..<3, id: \.self) { index in
-                    if index < items.count, let thumbnail = items[index].thumbnail {
-                        Image(uiImage: thumbnail)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: imageWidth, height: 100)
-                            .clipped()
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    } else {
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color(.systemGray5))
-                            .frame(width: imageWidth, height: 100)
-                            .overlay(
-                                Image(systemName: "photo")
-                                    .font(.title2)
-                                    .foregroundColor(.gray)
-                            )
-                    }
+        HStack(spacing: 8) {
+            ForEach(0..<3, id: \.self) { index in
+                if index < items.count, let thumbnail = items[index].thumbnail {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(height: 100)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                } else {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(.systemGray5))
+                        .frame(height: 100)
+                        .frame(maxWidth: .infinity)
+                        .overlay(
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        )
                 }
             }
         }

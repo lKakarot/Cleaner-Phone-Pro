@@ -17,19 +17,19 @@ struct ContentView: View {
                 Color(.systemGroupedBackground)
                     .ignoresSafeArea()
 
-                if viewModel.authorizationStatus == .notDetermined {
-                    PermissionRequestView {
-                        Task {
-                            await viewModel.requestAccess()
-                        }
-                    }
-                } else if viewModel.authorizationStatus == .denied || viewModel.authorizationStatus == .restricted {
+                if viewModel.authorizationStatus == .denied || viewModel.authorizationStatus == .restricted {
                     PermissionDeniedView()
-                } else {
+                } else if viewModel.authorizationStatus == .authorized || viewModel.authorizationStatus == .limited {
                     ScrollView {
                         LazyVStack(spacing: 16) {
                             ForEach(viewModel.categories) { categoryData in
-                                CategoryCardView(categoryData: categoryData)
+                                NavigationLink(destination: CategoryDetailView(
+                                    viewModel: viewModel,
+                                    categoryData: categoryData
+                                )) {
+                                    CategoryCardView(categoryData: categoryData)
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
                         .padding()
@@ -44,43 +44,9 @@ struct ContentView: View {
             .navigationTitle("Cleaner Pro")
         }
         .task {
-            if viewModel.authorizationStatus == .authorized || viewModel.authorizationStatus == .limited {
-                await viewModel.loadAllCategories()
-            }
+            // Request permission on launch (shows system popup if not determined)
+            await viewModel.requestAccess()
         }
-    }
-}
-
-struct PermissionRequestView: View {
-    let onRequest: () -> Void
-
-    var body: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "photo.stack")
-                .font(.system(size: 60))
-                .foregroundColor(.blue)
-
-            Text("Accès aux photos requis")
-                .font(.title2)
-                .fontWeight(.bold)
-
-            Text("Pour analyser et nettoyer vos photos, l'application a besoin d'accéder à votre photothèque.")
-                .multilineTextAlignment(.center)
-                .foregroundColor(.secondary)
-                .padding(.horizontal)
-
-            Button(action: onRequest) {
-                Text("Autoriser l'accès")
-                    .fontWeight(.semibold)
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.blue)
-                    .cornerRadius(12)
-            }
-            .padding(.horizontal, 40)
-        }
-        .padding()
     }
 }
 
@@ -120,22 +86,72 @@ struct PermissionDeniedView: View {
 }
 
 struct LoadingOverlay: View {
+    @State private var isAnimating = false
+
     var body: some View {
         ZStack {
-            Color.black.opacity(0.3)
+            // Fond flouté
+            Color(.systemBackground).opacity(0.85)
                 .ignoresSafeArea()
 
-            VStack(spacing: 16) {
-                ProgressView()
-                    .scaleEffect(1.5)
+            VStack(spacing: 24) {
+                // Icône animée
+                ZStack {
+                    // Cercle extérieur qui pulse
+                    Circle()
+                        .stroke(
+                            LinearGradient(
+                                colors: [.blue.opacity(0.3), .purple.opacity(0.3)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 4
+                        )
+                        .frame(width: 80, height: 80)
+                        .scaleEffect(isAnimating ? 1.2 : 1.0)
+                        .opacity(isAnimating ? 0.3 : 0.8)
+
+                    // Cercle qui tourne
+                    Circle()
+                        .trim(from: 0, to: 0.7)
+                        .stroke(
+                            LinearGradient(
+                                colors: [.blue, .purple],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                        )
+                        .frame(width: 60, height: 60)
+                        .rotationEffect(.degrees(isAnimating ? 360 : 0))
+
+                    // Icône centrale
+                    Image(systemName: "photo.stack.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.blue, .purple],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                }
 
                 Text("Analyse en cours...")
-                    .font(.headline)
-                    .foregroundColor(.white)
+                    .font(.title3)
+                    .fontWeight(.semibold)
             }
-            .padding(30)
-            .background(Color(.systemGray6))
-            .cornerRadius(16)
+            .padding(40)
+            .background(
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(Color(.systemBackground))
+                    .shadow(color: .black.opacity(0.1), radius: 20, y: 10)
+            )
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
+                isAnimating = true
+            }
         }
     }
 }
