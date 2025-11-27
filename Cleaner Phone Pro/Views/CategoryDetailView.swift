@@ -233,11 +233,11 @@ struct VerticalAccordionView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var currentIndex: Int = 0
     @State private var dragOffset: CGFloat = 0
-    @State private var loadedHDImage: UIImage?
-    @State private var isLoadingHD = false
+    @State private var hdImages: [String: UIImage] = [:] // Cache des images HD par ID
     @State private var isPlayingVideo = false
     @State private var videoPlayer: AVPlayer?
-    @State private var isLoadingVideo = false
+    @StateObject private var videoLoader = VideoLoader()
+    @State private var hdLoadTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -248,7 +248,7 @@ struct VerticalAccordionView: View {
                     ForEach(Array(group.items.enumerated().reversed()), id: \.element.id) { index, item in
                         VerticalAccordionCard(
                             item: item,
-                            highQualityImage: index == currentIndex ? loadedHDImage : nil,
+                            highQualityImage: hdImages[item.id],
                             isSelected: selectedItems.contains(item),
                             index: index,
                             currentIndex: currentIndex,
@@ -275,11 +275,9 @@ struct VerticalAccordionView: View {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                                 if value.translation.height > threshold && currentIndex < group.items.count - 1 {
                                     currentIndex += 1
-                                    loadedHDImage = nil
                                     stopVideo()
                                 } else if value.translation.height < -threshold && currentIndex > 0 {
                                     currentIndex -= 1
-                                    loadedHDImage = nil
                                     stopVideo()
                                 }
                                 dragOffset = 0
@@ -335,61 +333,61 @@ struct VerticalAccordionView: View {
                 // Bottom controls
                 if let currentItem = group.items[safe: currentIndex] {
                     VStack(spacing: 12) {
-                        // Action buttons row
-                        HStack(spacing: 16) {
-                            // Play/Stop button for videos
-                            if currentItem.asset.mediaType == .video {
-                                Button(action: {
-                                    if isPlayingVideo {
-                                        stopVideo()
-                                    } else {
-                                        playVideo(for: currentItem.asset)
-                                    }
-                                }) {
-                                    HStack(spacing: 6) {
-                                        if isLoadingVideo {
-                                            ProgressView()
-                                                .tint(.white)
-                                                .scaleEffect(0.8)
-                                        } else {
-                                            Image(systemName: isPlayingVideo ? "stop.fill" : "play.fill")
-                                        }
-                                        Text(isPlayingVideo ? "Stop" : "Lire")
-                                    }
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 20)
-                                    .padding(.vertical, 12)
-                                    .background(isPlayingVideo ? Color.red : Color.green)
-                                    .cornerRadius(25)
+                        // iCloud download progress indicator
+                        if case .downloadingFromCloud(let progress) = videoLoader.state {
+                            VStack(spacing: 8) {
+                                ZStack {
+                                    Circle()
+                                        .stroke(Color.white.opacity(0.3), lineWidth: 3)
+                                        .frame(width: 50, height: 50)
+                                    Circle()
+                                        .trim(from: 0, to: progress)
+                                        .stroke(Color.white, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                                        .frame(width: 50, height: 50)
+                                        .rotationEffect(.degrees(-90))
+                                    Text("\(Int(progress * 100))%")
+                                        .font(.caption2)
+                                        .fontWeight(.bold)
+                                        .foregroundColor(.white)
                                 }
-                                .disabled(isLoadingVideo)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "icloud.and.arrow.down")
+                                    Text("Téléchargement iCloud...")
+                                }
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.8))
                             }
+                            .padding(.bottom, 8)
+                        }
 
-                            // HD button
-                            if loadedHDImage == nil && currentItem.asset.mediaType == .image {
-                                Button(action: { loadHD(currentItem) }) {
-                                    HStack(spacing: 6) {
-                                        if isLoadingHD {
-                                            ProgressView()
-                                                .tint(.white)
-                                                .scaleEffect(0.8)
-                                        } else {
-                                            Image(systemName: "arrow.up.circle")
-                                        }
-                                        Text("HD")
-                                    }
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 20)
-                                    .padding(.vertical, 12)
-                                    .background(Color.orange)
-                                    .cornerRadius(25)
+                        // Action buttons row (only for videos)
+                        if currentItem.asset.mediaType == .video {
+                            Button(action: {
+                                if isPlayingVideo {
+                                    stopVideo()
+                                } else {
+                                    playVideo(for: currentItem.asset)
                                 }
-                                .disabled(isLoadingHD)
+                            }) {
+                                HStack(spacing: 6) {
+                                    if case .loading = videoLoader.state {
+                                        ProgressView()
+                                            .tint(.white)
+                                            .scaleEffect(0.8)
+                                    } else {
+                                        Image(systemName: isPlayingVideo ? "stop.fill" : "play.fill")
+                                    }
+                                    Text(isPlayingVideo ? "Stop" : "Lire")
+                                }
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 12)
+                                .background(isPlayingVideo ? Color.red : Color.green)
+                                .cornerRadius(25)
                             }
+                            .disabled(isVideoLoading)
                         }
 
                         // Select button
@@ -423,38 +421,74 @@ struct VerticalAccordionView: View {
                 }
             }
         }
-        .onDisappear {
-            stopVideo()
+        .onAppear {
+            startHDPreloading()
         }
-    }
-
-    private func playVideo(for asset: PHAsset) {
-        isLoadingVideo = true
-        Task {
-            if let playerItem = await PhotoLibraryService.shared.getPlayerItem(for: asset) {
+        .onChange(of: currentIndex) { _ in
+            startHDPreloading()
+        }
+        .onChange(of: videoLoader.state) { newState in
+            if case .ready(let playerItem) = newState {
                 let player = AVPlayer(playerItem: playerItem)
                 self.videoPlayer = player
                 self.isPlayingVideo = true
                 player.play()
             }
-            isLoadingVideo = false
         }
+        .onDisappear {
+            stopVideo()
+            hdLoadTask?.cancel()
+        }
+    }
+
+    // MARK: - HD Preloading
+
+    private func startHDPreloading() {
+        hdLoadTask?.cancel()
+        hdLoadTask = Task {
+            // Preload current, next and previous items
+            let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex - 1]
+                .filter { $0 >= 0 && $0 < group.items.count }
+
+            for index in indicesToLoad {
+                let item = group.items[index]
+
+                // Skip if already loaded or if it's a video
+                if hdImages[item.id] != nil || item.asset.mediaType == .video {
+                    continue
+                }
+
+                // Check if task was cancelled
+                if Task.isCancelled { break }
+
+                // Load HD image
+                if let hdImage = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
+                    if !Task.isCancelled {
+                        hdImages[item.id] = hdImage
+                    }
+                }
+            }
+        }
+    }
+
+    private var isVideoLoading: Bool {
+        switch videoLoader.state {
+        case .loading, .downloadingFromCloud:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func playVideo(for asset: PHAsset) {
+        videoLoader.load(asset: asset)
     }
 
     private func stopVideo() {
         videoPlayer?.pause()
         videoPlayer = nil
         isPlayingVideo = false
-    }
-
-    private func loadHD(_ item: MediaItem) {
-        isLoadingHD = true
-        Task {
-            if let image = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
-                loadedHDImage = image
-            }
-            isLoadingHD = false
-        }
+        videoLoader.cancel()
     }
 
     private func toggleSelection(_ item: MediaItem) {
@@ -474,11 +508,11 @@ struct ItemsAccordionView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var currentIndex: Int = 0
     @State private var dragOffset: CGFloat = 0
-    @State private var loadedHDImage: UIImage?
-    @State private var isLoadingHD = false
+    @State private var hdImages: [String: UIImage] = [:] // Cache des images HD par ID
     @State private var isPlayingVideo = false
     @State private var videoPlayer: AVPlayer?
-    @State private var isLoadingVideo = false
+    @StateObject private var videoLoader = VideoLoader()
+    @State private var hdLoadTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -489,7 +523,7 @@ struct ItemsAccordionView: View {
                     ForEach(Array(items.enumerated().reversed()), id: \.element.id) { index, item in
                         VerticalAccordionCard(
                             item: item,
-                            highQualityImage: index == currentIndex ? loadedHDImage : nil,
+                            highQualityImage: hdImages[item.id],
                             isSelected: selectedItems.contains(item),
                             index: index,
                             currentIndex: currentIndex,
@@ -516,11 +550,9 @@ struct ItemsAccordionView: View {
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                                 if value.translation.height > threshold && currentIndex < items.count - 1 {
                                     currentIndex += 1
-                                    loadedHDImage = nil
                                     stopVideo()
                                 } else if value.translation.height < -threshold && currentIndex > 0 {
                                     currentIndex -= 1
-                                    loadedHDImage = nil
                                     stopVideo()
                                 }
                                 dragOffset = 0
@@ -576,61 +608,61 @@ struct ItemsAccordionView: View {
                 // Bottom controls
                 if let currentItem = items[safe: currentIndex] {
                     VStack(spacing: 12) {
-                        // Action buttons row
-                        HStack(spacing: 16) {
-                            // Play/Stop button for videos
-                            if currentItem.asset.mediaType == .video {
-                                Button(action: {
-                                    if isPlayingVideo {
-                                        stopVideo()
-                                    } else {
-                                        playVideo(for: currentItem.asset)
-                                    }
-                                }) {
-                                    HStack(spacing: 6) {
-                                        if isLoadingVideo {
-                                            ProgressView()
-                                                .tint(.white)
-                                                .scaleEffect(0.8)
-                                        } else {
-                                            Image(systemName: isPlayingVideo ? "stop.fill" : "play.fill")
-                                        }
-                                        Text(isPlayingVideo ? "Stop" : "Lire")
-                                    }
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 20)
-                                    .padding(.vertical, 12)
-                                    .background(isPlayingVideo ? Color.red : Color.green)
-                                    .cornerRadius(25)
+                        // iCloud download progress indicator
+                        if case .downloadingFromCloud(let progress) = videoLoader.state {
+                            VStack(spacing: 8) {
+                                ZStack {
+                                    Circle()
+                                        .stroke(Color.white.opacity(0.3), lineWidth: 3)
+                                        .frame(width: 50, height: 50)
+                                    Circle()
+                                        .trim(from: 0, to: progress)
+                                        .stroke(Color.white, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                                        .frame(width: 50, height: 50)
+                                        .rotationEffect(.degrees(-90))
+                                    Text("\(Int(progress * 100))%")
+                                        .font(.caption2)
+                                        .fontWeight(.bold)
+                                        .foregroundColor(.white)
                                 }
-                                .disabled(isLoadingVideo)
+                                HStack(spacing: 4) {
+                                    Image(systemName: "icloud.and.arrow.down")
+                                    Text("Téléchargement iCloud...")
+                                }
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.8))
                             }
+                            .padding(.bottom, 8)
+                        }
 
-                            // HD button
-                            if loadedHDImage == nil && currentItem.asset.mediaType == .image {
-                                Button(action: { loadHD(currentItem) }) {
-                                    HStack(spacing: 6) {
-                                        if isLoadingHD {
-                                            ProgressView()
-                                                .tint(.white)
-                                                .scaleEffect(0.8)
-                                        } else {
-                                            Image(systemName: "arrow.up.circle")
-                                        }
-                                        Text("HD")
-                                    }
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 20)
-                                    .padding(.vertical, 12)
-                                    .background(Color.orange)
-                                    .cornerRadius(25)
+                        // Action buttons row (only for videos)
+                        if currentItem.asset.mediaType == .video {
+                            Button(action: {
+                                if isPlayingVideo {
+                                    stopVideo()
+                                } else {
+                                    playVideo(for: currentItem.asset)
                                 }
-                                .disabled(isLoadingHD)
+                            }) {
+                                HStack(spacing: 6) {
+                                    if case .loading = videoLoader.state {
+                                        ProgressView()
+                                            .tint(.white)
+                                            .scaleEffect(0.8)
+                                    } else {
+                                        Image(systemName: isPlayingVideo ? "stop.fill" : "play.fill")
+                                    }
+                                    Text(isPlayingVideo ? "Stop" : "Lire")
+                                }
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 12)
+                                .background(isPlayingVideo ? Color.red : Color.green)
+                                .cornerRadius(25)
                             }
+                            .disabled(isVideoLoading)
                         }
 
                         // Select button
@@ -664,38 +696,74 @@ struct ItemsAccordionView: View {
                 }
             }
         }
-        .onDisappear {
-            stopVideo()
+        .onAppear {
+            startHDPreloading()
         }
-    }
-
-    private func playVideo(for asset: PHAsset) {
-        isLoadingVideo = true
-        Task {
-            if let playerItem = await PhotoLibraryService.shared.getPlayerItem(for: asset) {
+        .onChange(of: currentIndex) { _ in
+            startHDPreloading()
+        }
+        .onChange(of: videoLoader.state) { newState in
+            if case .ready(let playerItem) = newState {
                 let player = AVPlayer(playerItem: playerItem)
                 self.videoPlayer = player
                 self.isPlayingVideo = true
                 player.play()
             }
-            isLoadingVideo = false
         }
+        .onDisappear {
+            stopVideo()
+            hdLoadTask?.cancel()
+        }
+    }
+
+    // MARK: - HD Preloading
+
+    private func startHDPreloading() {
+        hdLoadTask?.cancel()
+        hdLoadTask = Task {
+            // Preload current, next and previous items
+            let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex - 1]
+                .filter { $0 >= 0 && $0 < items.count }
+
+            for index in indicesToLoad {
+                let item = items[index]
+
+                // Skip if already loaded or if it's a video
+                if hdImages[item.id] != nil || item.asset.mediaType == .video {
+                    continue
+                }
+
+                // Check if task was cancelled
+                if Task.isCancelled { break }
+
+                // Load HD image
+                if let hdImage = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
+                    if !Task.isCancelled {
+                        hdImages[item.id] = hdImage
+                    }
+                }
+            }
+        }
+    }
+
+    private var isVideoLoading: Bool {
+        switch videoLoader.state {
+        case .loading, .downloadingFromCloud:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func playVideo(for asset: PHAsset) {
+        videoLoader.load(asset: asset)
     }
 
     private func stopVideo() {
         videoPlayer?.pause()
         videoPlayer = nil
         isPlayingVideo = false
-    }
-
-    private func loadHD(_ item: MediaItem) {
-        isLoadingHD = true
-        Task {
-            if let image = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
-                loadedHDImage = image
-            }
-            isLoadingHD = false
-        }
+        videoLoader.cancel()
     }
 
     private func toggleSelection(_ item: MediaItem) {

@@ -117,3 +117,47 @@ struct CategoryData: Identifiable {
         Array(items.prefix(3))
     }
 }
+
+// MARK: - Library Diagnostics
+
+struct LibraryDiagnostics {
+    let totalAssets: Int
+    let totalImages: Int
+    let totalVideos: Int
+    let totalAudio: Int
+    let allPhotosAlbumCount: Int
+    let hiddenCount: Int
+    let burstExtraCount: Int
+    let localCount: Int
+    let iCloudOnlyCount: Int
+
+    /// Total des images et vidéos (ce que l'app peut récupérer)
+    var totalAccessible: Int {
+        totalImages + totalVideos
+    }
+
+    /// Éléments qui ne sont pas des photos/vidéos (audio, etc.)
+    var nonMediaCount: Int {
+        totalAssets - totalImages - totalVideos
+    }
+
+    var description: String {
+        """
+        📊 DIAGNOSTIC BIBLIOTHÈQUE:
+        ────────────────────────────
+        Total assets (tous types): \(totalAssets)
+        ├─ Images: \(totalImages)
+        ├─ Vidéos: \(totalVideos)
+        ├─ Audio: \(totalAudio)
+        └─ Album "Toutes les photos": \(allPhotosAlbumCount)
+
+        📍 Localisation:
+        ├─ Locaux sur iPhone: \(localCount)
+        └─ iCloud uniquement: \(iCloudOnlyCount)
+
+        🔒 Éléments non inclus par défaut:
+        ├─ Photos cachées: \(hiddenCount)
+        └─ Burst photos supplémentaires: \(burstExtraCount)
+        """
+    }
+}

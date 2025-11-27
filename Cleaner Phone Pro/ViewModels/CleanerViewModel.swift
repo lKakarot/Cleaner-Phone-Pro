@@ -12,6 +12,10 @@ class CleanerViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var authorizationStatus: PHAuthorizationStatus = .notDetermined
     @Published var isDeleting = false
+    @Published var totalPhotoCount = 0
+    @Published var totalVideoCount = 0
+    @Published var diagnostics: LibraryDiagnostics?
+    @Published var showDiagnostics = false
 
     private let photoService = PhotoLibraryService.shared
     private let cacheService = CacheService.shared
@@ -31,17 +35,11 @@ class CleanerViewModel: ObservableObject {
     }
 
     func loadAllCategories() async {
-        // Try to load from cache first
-        if let cache = cacheService.loadCacheIfValid() {
-            isLoading = true
-            await restoreFromCache(cache)
-            isLoading = false
-            await loadPreviewThumbnails()
-            return
-        }
-
-        // Full scan needed
         isLoading = true
+
+        // Run diagnostics
+        let diag = photoService.getLibraryDiagnostics()
+        diagnostics = diag
 
         // Phase 1: Fast metadata scan (no thumbnails)
         async let screenshots = photoService.fetchScreenshots()
@@ -53,6 +51,10 @@ class CleanerViewModel: ObservableObject {
         let largeVideosResult = await largeVideos
         let allPhotosResult = await allPhotos
         let allVideosResult = await allVideos
+
+        // Store total counts for display
+        totalPhotoCount = allPhotosResult.count + screenshotsResult.count
+        totalVideoCount = allVideosResult.count
 
         // Find similar photos/videos/screenshots with groups (sorted by most recent first)
         let (similarPhotos, photoGroups) = findPotentialDuplicatesWithGroups(in: allPhotosResult)
@@ -67,22 +69,15 @@ class CleanerViewModel: ObservableObject {
         let similarPhotoIds = Set(similarPhotos.map { $0.id })
         let others = allPhotosResult.filter { !similarPhotoIds.contains($0.id) }
 
-        // Set categories immediately (without thumbnails)
+        // Set categories immediately (without thumbnails) - NO LIMIT on others
         categories = [
             CategoryData(category: .similarPhotos, items: similarPhotos, similarGroups: photoGroups),
             CategoryData(category: .similarVideos, items: similarVideos, similarGroups: videoGroups),
             CategoryData(category: .similarScreenshots, items: similarScreenshots, similarGroups: screenshotGroups),
             CategoryData(category: .screenshots, items: uniqueScreenshots),
             CategoryData(category: .largeVideos, items: largeVideosResult),
-            CategoryData(category: .others, items: Array(others.prefix(50)))
+            CategoryData(category: .others, items: others)
         ]
-
-        // Save to cache for next time
-        cacheService.saveCache(
-            categories: categories,
-            photoCount: allPhotosResult.count + screenshotsResult.count,
-            videoCount: allVideosResult.count
-        )
 
         isLoading = false
 

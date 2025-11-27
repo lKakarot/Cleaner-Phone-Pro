@@ -270,25 +270,139 @@ class PhotoLibraryService: ObservableObject {
         return status
     }
 
+    // MARK: - Diagnostic: Get total counts from library
+
+    func getLibraryDiagnostics() -> LibraryDiagnostics {
+        // Get ALL photos (no filters at all)
+        let allAssetsOptions = PHFetchOptions()
+        let allAssets = PHAsset.fetchAssets(with: allAssetsOptions)
+
+        // Get all images
+        let allImagesOptions = PHFetchOptions()
+        let allImages = PHAsset.fetchAssets(with: .image, options: allImagesOptions)
+
+        // Get all videos
+        let allVideosOptions = PHFetchOptions()
+        let allVideos = PHAsset.fetchAssets(with: .video, options: allVideosOptions)
+
+        // Get all audio
+        let allAudioOptions = PHFetchOptions()
+        let allAudio = PHAsset.fetchAssets(with: .audio, options: allAudioOptions)
+
+        // Get smart albums to check "All Photos" album
+        let smartAlbums = PHAssetCollection.fetchAssetCollections(
+            with: .smartAlbum,
+            subtype: .smartAlbumUserLibrary,
+            options: nil
+        )
+
+        var allPhotosAlbumCount = 0
+        if let allPhotosAlbum = smartAlbums.firstObject {
+            let assets = PHAsset.fetchAssets(in: allPhotosAlbum, options: nil)
+            allPhotosAlbumCount = assets.count
+        }
+
+        // Count hidden photos
+        let hiddenAlbums = PHAssetCollection.fetchAssetCollections(
+            with: .smartAlbum,
+            subtype: .smartAlbumAllHidden,
+            options: nil
+        )
+        var hiddenCount = 0
+        if let hiddenAlbum = hiddenAlbums.firstObject {
+            let assets = PHAsset.fetchAssets(in: hiddenAlbum, options: nil)
+            hiddenCount = assets.count
+        }
+
+        // Count burst photos
+        let burstOptions = PHFetchOptions()
+        burstOptions.includeAllBurstAssets = true
+        let burstAssets = PHAsset.fetchAssets(with: .image, options: burstOptions)
+        let burstCount = burstAssets.count - allImages.count
+
+        // Count iCloud-only photos using PHAssetResource
+        // A photo is "local" if it has a resource that is available locally
+        var iCloudOnlyCount = 0
+        var localCount = 0
+
+        // Sample first 100 assets to get an estimate (full enumeration is slow)
+        let sampleSize = min(100, allAssets.count)
+        for i in 0..<sampleSize {
+            let asset = allAssets.object(at: i)
+            let resources = PHAssetResource.assetResources(for: asset)
+
+            // Check if any resource has locallyAvailable flag
+            var isLocal = false
+            for resource in resources {
+                // Use the more reliable locallyAvailable check
+                if let locallyAvailable = resource.value(forKey: "locallyAvailable") as? Bool {
+                    if locallyAvailable {
+                        isLocal = true
+                        break
+                    }
+                }
+            }
+
+            if isLocal {
+                localCount += 1
+            } else {
+                iCloudOnlyCount += 1
+            }
+        }
+
+        // Extrapolate to total count
+        if sampleSize > 0 {
+            let localRatio = Double(localCount) / Double(sampleSize)
+            localCount = Int(Double(allAssets.count) * localRatio)
+            iCloudOnlyCount = allAssets.count - localCount
+        }
+
+        return LibraryDiagnostics(
+            totalAssets: allAssets.count,
+            totalImages: allImages.count,
+            totalVideos: allVideos.count,
+            totalAudio: allAudio.count,
+            allPhotosAlbumCount: allPhotosAlbumCount,
+            hiddenCount: hiddenCount,
+            burstExtraCount: burstCount,
+            localCount: localCount,
+            iCloudOnlyCount: iCloudOnlyCount
+        )
+    }
+
     // MARK: - Fetch methods (metadata only, no thumbnails)
+
+    private func createFetchOptions(includeHidden: Bool = false, includeAllBursts: Bool = false) -> PHFetchOptions {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        // NE PAS définir includeAssetSourceTypes !
+        // Le défaut (quand non défini) inclut TOUS les types de sources
+        // Définir explicitement limite les résultats de manière inattendue
+        options.includeHiddenAssets = includeHidden
+        options.includeAllBurstAssets = includeAllBursts
+        return options
+    }
 
     func fetchScreenshots() async -> [MediaItem] {
         let options = PHFetchOptions()
-        options.predicate = NSPredicate(
-            format: "(mediaSubtype & %d) != 0",
-            PHAssetMediaSubtype.photoScreenshot.rawValue
-        )
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
 
-        let assets = PHAsset.fetchAssets(with: .image, options: options)
-        return fetchMediaItemsMetadataOnly(from: assets)
+        let allAssets = PHAsset.fetchAssets(with: .image, options: options)
+
+        var items: [MediaItem] = []
+        allAssets.enumerateObjects { asset, _, _ in
+            if asset.mediaSubtypes.contains(.photoScreenshot) {
+                let fileSize = self.getFileSize(for: asset)
+                items.append(MediaItem(asset: asset, thumbnail: nil, fileSize: fileSize))
+            }
+        }
+
+        return items
     }
 
     func fetchLargeVideos(minSizeMB: Int64 = 10) async -> [MediaItem] {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
 
         let assets = PHAsset.fetchAssets(with: .video, options: options)
         var items = fetchMediaItemsMetadataOnly(from: assets)
@@ -301,23 +415,38 @@ class PhotoLibraryService: ObservableObject {
 
     func fetchAllPhotos() async -> [MediaItem] {
         let options = PHFetchOptions()
-        options.predicate = NSPredicate(
-            format: "(mediaSubtype & %d) == 0",
-            PHAssetMediaSubtype.photoScreenshot.rawValue
-        )
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
 
-        let assets = PHAsset.fetchAssets(with: .image, options: options)
-        return fetchMediaItemsMetadataOnly(from: assets)
+        let allAssets = PHAsset.fetchAssets(with: .image, options: options)
+
+        var items: [MediaItem] = []
+        allAssets.enumerateObjects { asset, _, _ in
+            if !asset.mediaSubtypes.contains(.photoScreenshot) {
+                let fileSize = self.getFileSize(for: asset)
+                items.append(MediaItem(asset: asset, thumbnail: nil, fileSize: fileSize))
+            }
+        }
+
+        return items
     }
 
     func fetchAllVideos() async -> [MediaItem] {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        options.includeAssetSourceTypes = [.typeUserLibrary, .typeCloudShared, .typeiTunesSynced]
 
         let assets = PHAsset.fetchAssets(with: .video, options: options)
+        return fetchMediaItemsMetadataOnly(from: assets)
+    }
+
+    /// Fetch ALL photos including hidden and all burst photos
+    func fetchAllPhotosIncludingHiddenAndBursts() async -> [MediaItem] {
+        let options = createFetchOptions(includeHidden: true, includeAllBursts: true)
+        options.predicate = NSPredicate(
+            format: "(mediaSubtype & %d) == 0",
+            PHAssetMediaSubtype.photoScreenshot.rawValue
+        )
+
+        let assets = PHAsset.fetchAssets(with: .image, options: options)
         return fetchMediaItemsMetadataOnly(from: assets)
     }
 
