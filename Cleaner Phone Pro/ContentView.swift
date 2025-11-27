@@ -59,105 +59,56 @@ struct CleanerTabView: View {
                 if viewModel.authorizationStatus == .denied || viewModel.authorizationStatus == .restricted {
                     PermissionDeniedView()
                 } else if viewModel.authorizationStatus == .authorized || viewModel.authorizationStatus == .limited {
-                    VStack(spacing: 0) {
-                        // Progress bar for background analysis
-                        if viewModel.isAnalyzing {
-                            AnalysisProgressBar(
-                                progress: viewModel.analysisProgress,
-                                message: viewModel.analysisMessage
-                            )
-                        }
-
-                        ScrollView {
-                            LazyVStack(spacing: 16) {
-                                // Warning if limited access
-                                if viewModel.authorizationStatus == .limited {
-                                    LimitedAccessBanner()
-                                }
-
-                                // Stats header with diagnostic button
-                                if viewModel.totalPhotoCount > 0 || viewModel.totalVideoCount > 0 {
-                                    HStack {
-                                        // Diagnostic info
-                                        if let diag = viewModel.diagnostics {
-                                            VStack(alignment: .leading, spacing: 4) {
-                                                HStack {
-                                                    Label("\(viewModel.totalPhotoCount) photos", systemImage: "photo")
-                                                    Spacer()
-                                                    Label("\(viewModel.totalVideoCount) vidéos", systemImage: "video")
-                                                }
-
-                                                // Show warning only if there's a real discrepancy (excluding audio)
-                                                let totalFetched = viewModel.totalPhotoCount + viewModel.totalVideoCount
-                                                let expectedTotal = diag.totalImages + diag.totalVideos
-                                                if totalFetched < expectedTotal {
-                                                    let missing = expectedTotal - totalFetched
-                                                    HStack(spacing: 4) {
-                                                        Image(systemName: "eye.slash")
-                                                            .foregroundColor(.orange)
-                                                        if missing <= diag.hiddenCount && diag.hiddenCount > 0 {
-                                                            Text("\(missing) photos masquées")
-                                                        } else {
-                                                            Text("\(missing) éléments non accessibles")
-                                                        }
-                                                    }
-                                                    .foregroundColor(.orange)
-                                                    .font(.caption2)
-                                                    .padding(.top, 2)
-                                                }
-                                            }
-                                        } else {
-                                            HStack {
-                                                Label("\(viewModel.totalPhotoCount) photos", systemImage: "photo")
-                                                Spacer()
-                                                Label("\(viewModel.totalVideoCount) vidéos", systemImage: "video")
-                                            }
-                                        }
-                                    }
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .padding(.horizontal)
-                                }
-
-                                // Diagnostic panel (expandable)
-                                if let diag = viewModel.diagnostics, viewModel.showDiagnostics {
-                                    DiagnosticsView(diagnostics: diag)
-                                }
-
-                                ForEach(viewModel.categories) { categoryData in
-                                    NavigationLink(destination: CategoryDetailView(
-                                        viewModel: viewModel,
-                                        categoryData: categoryData
-                                    )) {
-                                        CategoryCardView(categoryData: categoryData)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
+                    ScrollView {
+                        LazyVStack(spacing: 16) {
+                            // Progress bar for background analysis
+                            if viewModel.isAnalyzing {
+                                AnalysisProgressBar(
+                                    progress: viewModel.analysisProgress,
+                                    message: viewModel.analysisMessage
+                                )
                             }
-                            .padding()
+
+                            // Warning if limited access
+                            if viewModel.authorizationStatus == .limited {
+                                LimitedAccessBanner()
+                            }
+
+                            // Stats header
+                            if viewModel.totalPhotoCount > 0 || viewModel.totalVideoCount > 0 {
+                                HStack {
+                                    Label("\(viewModel.totalPhotoCount) photos", systemImage: "photo")
+                                    Spacer()
+                                    Label("\(viewModel.totalVideoCount) vidéos", systemImage: "video")
+                                }
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal)
+                            }
+
+                            // Diagnostic panel (expandable)
+                            if let diag = viewModel.diagnostics, viewModel.showDiagnostics {
+                                DiagnosticsView(diagnostics: diag)
+                            }
+
+                            ForEach(viewModel.categories) { categoryData in
+                                NavigationLink(destination: CategoryDetailView(
+                                    viewModel: viewModel,
+                                    categoryData: categoryData
+                                )) {
+                                    CategoryCardView(categoryData: categoryData)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
-                        .refreshable {
-                            await viewModel.loadAllCategories()
-                        }
+                        .padding()
+                    }
+                    .refreshable {
+                        await viewModel.loadAllCategories()
                     }
                 }
             }
-            .navigationTitle("Nettoyer")
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
-            .toolbar {
-                if viewModel.diagnostics != nil {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button(action: {
-                            withAnimation {
-                                viewModel.showDiagnostics.toggle()
-                            }
-                        }) {
-                            Image(systemName: viewModel.showDiagnostics ? "chart.bar.fill" : "chart.bar")
-                        }
-                    }
-                }
-            }
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 }
@@ -558,9 +509,7 @@ struct TimelineTabView: View {
                     }
                 }
             }
-            .navigationTitle("Timeline")
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+            .toolbar(.hidden, for: .navigationBar)
             .onChange(of: groupBy) { _ in loadTimeline() }
             .onChange(of: mediaFilter) { _ in loadTimeline() }
             .onAppear { loadTimeline() }
@@ -785,6 +734,15 @@ struct SwipeTabView: View {
                                     .font(.caption)
                                     .foregroundColor(.green)
                             }
+
+                            Spacer()
+
+                            Button("Terminer") {
+                                currentIndex = allMedia.count
+                            }
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.blue)
                         }
                         .padding(.horizontal)
 
@@ -886,18 +844,7 @@ struct SwipeTabView: View {
                     }
                 }
             }
-            .navigationTitle("Trier")
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbarBackground(Color(.systemBackground), for: .navigationBar)
-            .toolbar {
-                if !isLoading && currentIndex < allMedia.count {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Terminer") {
-                            currentIndex = allMedia.count
-                        }
-                    }
-                }
-            }
+            .toolbar(.hidden, for: .navigationBar)
             .onAppear {
                 loadAllMedia()
             }

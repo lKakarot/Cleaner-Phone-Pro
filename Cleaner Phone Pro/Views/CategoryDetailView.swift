@@ -23,7 +23,7 @@ struct CategoryDetailView: View {
     var body: some View {
         ZStack {
             Color(.systemGroupedBackground)
-                .ignoresSafeArea()
+                .ignoresSafeArea(edges: .bottom)
 
             if categoryData.category.hasSimilarGroups {
                 similarPhotosView
@@ -35,8 +35,9 @@ struct CategoryDetailView: View {
                 loadingThumbnailsOverlay
             }
         }
-        .navigationTitle(categoryData.category.rawValue)
-        .navigationBarTitleDisplayMode(.large)
+        .background(Color(.systemBackground))
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbarBackground(Color(.systemBackground), for: .navigationBar)
         .fullScreenCover(isPresented: $showFullAccordion) {
