@@ -37,8 +37,16 @@ struct ContentView: View {
                     Text("Trier")
                 }
                 .tag(2)
+
+            // Tab 4: Compress (compression images/vidéos)
+            CompressTabView(viewModel: viewModel)
+                .tabItem {
+                    Image(systemName: "arrow.down.circle.fill")
+                    Text("Compresser")
+                }
+                .tag(3)
         }
-        .tint(.blue)
+        .tint(Color(.label)) // Modern: adapts to light/dark mode
         // Note: requestAccess() is now called during onboarding
     }
 }
@@ -100,9 +108,6 @@ struct CleanerTabView: View {
                             }
                         }
                         .padding()
-                    }
-                    .refreshable {
-                        await viewModel.loadAllCategories()
                     }
                 }
             }
@@ -452,6 +457,7 @@ struct TimelineTabView: View {
                     }
                 }
             }
+            .background(Color(.systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
             .onChange(of: groupBy) { _ in loadTimeline() }
             .onChange(of: viewModel.dataVersion) { _ in loadTimeline() }
@@ -507,7 +513,7 @@ struct TimelineTabView: View {
             dateFormatter.locale = Locale(identifier: "fr_FR")
 
             for (components, items) in grouped {
-                var date = calendar.date(from: components) ?? Date()
+                let date = calendar.date(from: components) ?? Date()
                 let title: String
                 let subtitle: String
 
@@ -681,6 +687,7 @@ struct TimelinePeriodDetailView: View {
     @State private var selectedPhotoIndex: Int?
     @State private var showSwipeMode = false
     @State private var loadedThumbnails: [String: UIImage] = [:]
+    @State private var displayedItems: [MediaItem] = []
 
     private let columns = [
         GridItem(.flexible(), spacing: 2),
@@ -688,20 +695,38 @@ struct TimelinePeriodDetailView: View {
         GridItem(.flexible(), spacing: 2)
     ]
 
+    // Get all existing item IDs from viewModel categories
+    private var existingItemIds: Set<String> {
+        Set(viewModel.categories.flatMap { $0.items.map { $0.id } })
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: 2) {
-                    ForEach(Array(period.items.enumerated()), id: \.element.id) { index, item in
-                        TimelineGridCell(
-                            item: item,
-                            thumbnail: loadedThumbnails[item.id],
-                            onTap: { selectedPhotoIndex = index },
-                            onAppear: { loadThumbnailIfNeeded(for: item) }
-                        )
+                if displayedItems.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 50))
+                            .foregroundColor(.green)
+                        Text("Toutes les photos ont été triées")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.top, 100)
+                } else {
+                    LazyVGrid(columns: columns, spacing: 2) {
+                        ForEach(Array(displayedItems.enumerated()), id: \.element.id) { index, item in
+                            TimelineGridCell(
+                                item: item,
+                                thumbnail: loadedThumbnails[item.id],
+                                onTap: { selectedPhotoIndex = index },
+                                onAppear: { loadThumbnailIfNeeded(for: item) }
+                            )
+                        }
+                    }
+                    .padding(2)
                 }
-                .padding(2)
             }
             .navigationTitle("\(period.title) \(period.subtitle)")
             .navigationBarTitleDisplayMode(.inline)
@@ -714,26 +739,43 @@ struct TimelinePeriodDetailView: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(action: { showSwipeMode = true }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "hand.draw")
-                            Text("Trier")
+                    if !displayedItems.isEmpty {
+                        Button(action: { showSwipeMode = true }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "hand.draw")
+                                Text("Trier")
+                            }
+                            .font(.subheadline)
+                            .fontWeight(.medium)
                         }
-                        .font(.subheadline)
-                        .fontWeight(.medium)
                     }
                 }
             }
+            .onAppear {
+                // Initialize with period items
+                displayedItems = period.items
+            }
+            .onChange(of: viewModel.dataVersion) { _ in
+                // Filter out deleted items when data changes
+                displayedItems = displayedItems.filter { existingItemIds.contains($0.id) }
+            }
             .fullScreenCover(item: $selectedPhotoIndex) { index in
                 PhotoViewerView(
-                    items: period.items,
+                    items: displayedItems,
                     initialIndex: index,
                     onDismiss: { selectedPhotoIndex = nil }
                 )
             }
             .fullScreenCover(isPresented: $showSwipeMode) {
                 TimelineSwipeModeView(
-                    period: period,
+                    period: TimelinePeriod(
+                        title: period.title,
+                        subtitle: period.subtitle,
+                        date: period.date,
+                        items: displayedItems,
+                        photoCount: displayedItems.filter { $0.asset.mediaType == .image }.count,
+                        videoCount: displayedItems.filter { $0.asset.mediaType == .video }.count
+                    ),
                     viewModel: viewModel
                 )
             }
@@ -1081,8 +1123,8 @@ struct TimelineSwipeModeView: View {
 
                     // Card
                     ZStack {
-                        // Background cards
-                        ForEach(0..<min(2, period.items.count - currentIndex - 1), id: \.self) { i in
+                        // Background cards - reversed so next card is on top
+                        ForEach((0..<min(2, period.items.count - currentIndex - 1)).reversed(), id: \.self) { i in
                             let index = currentIndex + i + 1
                             if index < period.items.count {
                                 SwipeCardBackground(
@@ -1189,6 +1231,14 @@ struct TimelineSwipeModeView: View {
 
     private func loadVisibleItems() {
         hdImage = nil
+
+        // Keep some thumbnails in cache, only clear old ones
+        if !period.items.isEmpty {
+            let validRange = max(0, currentIndex - 1)...min(period.items.count - 1, currentIndex + 3)
+            let indicesToKeep = Set(validRange.map { period.items[$0].id })
+            loadedThumbnails = loadedThumbnails.filter { indicesToKeep.contains($0.key) }
+        }
+
         let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex + 2]
             .filter { $0 >= 0 && $0 < period.items.count }
 
@@ -1196,7 +1246,8 @@ struct TimelineSwipeModeView: View {
             let item = period.items[index]
             if item.thumbnail == nil && loadedThumbnails[item.id] == nil {
                 Task {
-                    if let thumb = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .detail) {
+                    // Use .swipe quality for much better initial display
+                    if let thumb = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .swipe) {
                         await MainActor.run {
                             loadedThumbnails[item.id] = thumb
                         }
@@ -1525,8 +1576,8 @@ struct SwipeTabView: View {
 
                         // Card
                         ZStack {
-                            // Background cards (next items)
-                            ForEach(0..<min(2, allMedia.count - currentIndex - 1), id: \.self) { i in
+                            // Background cards (next items) - reversed so next card is on top
+                            ForEach((0..<min(2, allMedia.count - currentIndex - 1)).reversed(), id: \.self) { i in
                                 let index = currentIndex + i + 1
                                 if index < allMedia.count {
                                     SwipeCardBackground(
@@ -1678,10 +1729,13 @@ struct SwipeTabView: View {
         }
     }
 
-    // Only load thumbnails for current + next 2 items
+    // Load high-quality thumbnails for current + next items
     private func loadVisibleItems() {
         hdImage = nil
-        loadedThumbnails = [:] // Clear old thumbnails to free memory
+
+        // Keep some thumbnails in cache, only clear old ones
+        let indicesToKeep = Set((max(0, currentIndex - 1)...min(allMedia.count - 1, currentIndex + 3)).map { allMedia[$0].id })
+        loadedThumbnails = loadedThumbnails.filter { indicesToKeep.contains($0.key) }
 
         let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex + 2]
             .filter { $0 >= 0 && $0 < allMedia.count }
@@ -1689,10 +1743,11 @@ struct SwipeTabView: View {
         for index in indicesToLoad {
             let item = allMedia[index]
 
-            // Load thumbnail if not already loaded
+            // Load high-quality thumbnail if not already loaded
             if item.thumbnail == nil && loadedThumbnails[item.id] == nil {
                 Task {
-                    if let thumb = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .detail) {
+                    // Use .swipe quality for much better initial display
+                    if let thumb = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .swipe) {
                         await MainActor.run {
                             loadedThumbnails[item.id] = thumb
                         }
@@ -1701,7 +1756,7 @@ struct SwipeTabView: View {
             }
         }
 
-        // Load HD for current item only
+        // Load HD for current item
         loadHDForCurrentItem()
     }
 
@@ -1846,13 +1901,15 @@ struct SwipeCard: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                // Image
+                // Background color for letterboxing
+                Color(.systemGray6)
+
+                // Image - fit to show entire photo without cropping
                 if let image = hdImage ?? thumbnail {
                     Image(uiImage: image)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .clipped()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: geo.size.width, maxHeight: geo.size.height)
                 } else {
                     Rectangle()
                         .fill(Color(.systemGray4))
@@ -1954,12 +2011,14 @@ struct SwipeCardBackground: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
+                // Background color for letterboxing
+                Color(.systemGray6)
+
                 if let thumbnail = thumbnail {
                     Image(uiImage: thumbnail)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .clipped()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: geo.size.width, maxHeight: geo.size.height)
                 } else {
                     Rectangle()
                         .fill(Color(.systemGray4))

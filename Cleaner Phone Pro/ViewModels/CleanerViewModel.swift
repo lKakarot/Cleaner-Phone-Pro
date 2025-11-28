@@ -43,10 +43,34 @@ class CleanerViewModel: ObservableObject {
         // Sync authorization status (important when called from onboarding preloader)
         authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
 
+        // Check if we have a valid cache first (FAST PATH)
+        if let validCache = cacheService.loadCacheIfValid() {
+            isAnalyzing = true
+            analysisProgress = 0.5
+            analysisMessage = "Chargement depuis le cache..."
+
+            await restoreFromCache(validCache)
+            totalPhotoCount = validCache.photoCount
+            totalVideoCount = validCache.videoCount
+
+            analysisProgress = 0.9
+            analysisMessage = "Chargement miniatures..."
+
+            // Load preview thumbnails
+            await loadPreviewThumbnails()
+
+            analysisProgress = 1.0
+            analysisMessage = "Terminé"
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            isAnalyzing = false
+            return
+        }
+
+        // No valid cache - do full analysis (SLOW PATH)
         // Start with progress bar immediately
         isAnalyzing = true
         analysisProgress = 0
-        analysisMessage = "Récupération des médias..."
+        analysisMessage = "Première analyse..."
 
         // Run diagnostics
         let diag = photoService.getLibraryDiagnostics()
@@ -57,18 +81,14 @@ class CleanerViewModel: ObservableObject {
 
         // Phase 1: Fast metadata scan (no thumbnails)
         async let screenshots = photoService.fetchScreenshots()
-        async let largeVideos = photoService.fetchLargeVideos()
         async let allPhotos = photoService.fetchAllPhotos()
         async let allVideos = photoService.fetchAllVideos()
 
         let screenshotsResult = await screenshots
         analysisProgress = 0.10
 
-        let largeVideosResult = await largeVideos
-        analysisProgress = 0.12
-
         let allPhotosResult = await allPhotos
-        analysisProgress = 0.18
+        analysisProgress = 0.15
 
         let allVideosResult = await allVideos
         analysisProgress = 0.20
@@ -80,6 +100,14 @@ class CleanerViewModel: ObservableObject {
 
         // Videos: keep date-based grouping (can't hash videos easily)
         let (similarVideos, videoGroups) = findPotentialDuplicatesWithGroups(in: allVideosResult)
+
+        // Separate large videos (>100MB) from regular videos
+        let largeVideoThreshold: Int64 = 100 * 1024 * 1024 // 100 MB
+        let similarVideoIds = Set(similarVideos.map { $0.id })
+        let nonSimilarVideos = allVideosResult.filter { !similarVideoIds.contains($0.id) }
+        let largeVideosFiltered = nonSimilarVideos.filter { $0.fileSize >= largeVideoThreshold }
+            .sorted { $0.fileSize > $1.fileSize }
+        let regularVideos = nonSimilarVideos.filter { $0.fileSize < largeVideoThreshold }
 
         // Set initial categories with date-based grouping (fast)
         let (initialSimilarPhotos, initialPhotoGroups) = findPotentialDuplicatesWithGroups(in: allPhotosResult)
@@ -98,7 +126,8 @@ class CleanerViewModel: ObservableObject {
             CategoryData(category: .similarVideos, items: similarVideos, similarGroups: videoGroups),
             CategoryData(category: .similarScreenshots, items: initialSimilarScreenshots, similarGroups: initialScreenshotGroups),
             CategoryData(category: .screenshots, items: initialUniqueScreenshots),
-            CategoryData(category: .largeVideos, items: largeVideosResult),
+            CategoryData(category: .allVideos, items: regularVideos),
+            CategoryData(category: .largeVideos, items: largeVideosFiltered),
             CategoryData(category: .others, items: initialOthers)
         ]
 
@@ -168,9 +197,20 @@ class CleanerViewModel: ObservableObject {
             CategoryData(category: .similarVideos, items: similarVideos, similarGroups: videoGroups),
             CategoryData(category: .similarScreenshots, items: similarScreenshots, similarGroups: screenshotGroups),
             CategoryData(category: .screenshots, items: uniqueScreenshots),
-            CategoryData(category: .largeVideos, items: largeVideosResult),
+            CategoryData(category: .allVideos, items: regularVideos),
+            CategoryData(category: .largeVideos, items: largeVideosFiltered),
             CategoryData(category: .others, items: others)
         ]
+
+        analysisProgress = 0.98
+        analysisMessage = "Sauvegarde cache..."
+
+        // Save to cache for next launch (IMPORTANT!)
+        cacheService.saveCache(
+            categories: categories,
+            photoCount: totalPhotoCount,
+            videoCount: totalVideoCount
+        )
 
         analysisProgress = 1.0
         analysisMessage = "Terminé"
@@ -326,6 +366,9 @@ class CleanerViewModel: ObservableObject {
 
             // Clear cache since library changed
             cacheService.clearCache()
+
+            // Reload preview thumbnails for the new first 3 items of each category
+            await loadPreviewThumbnails()
 
             // Increment version to trigger UI refresh
             dataVersion += 1

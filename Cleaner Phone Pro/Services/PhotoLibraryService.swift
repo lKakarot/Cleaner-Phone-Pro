@@ -11,11 +11,13 @@ import Combine
 enum ThumbnailQuality {
     case preview    // Pour les 3 previews des cards (bonne qualité)
     case detail     // Pour la vue détail (bonne qualité)
+    case swipe      // Pour le mode swipe plein écran (haute qualité)
 
     var size: CGSize {
         switch self {
         case .preview: return CGSize(width: 400, height: 400)
         case .detail: return CGSize(width: 300, height: 300)
+        case .swipe: return CGSize(width: 900, height: 900)
         }
     }
 }
@@ -297,16 +299,65 @@ class PhotoLibraryService: ObservableObject {
     // OPTIMIZATION: Semaphore to limit concurrent thumbnail loads
     private let thumbnailSemaphore = AsyncSemaphore(limit: 6)
 
-    // OPTIMIZATION: Thumbnail cache to avoid reloading
+    // OPTIMIZATION: In-memory thumbnail cache
     private var thumbnailCache = NSCache<NSString, UIImage>()
 
+    // OPTIMIZATION: Disk cache for persistent thumbnail storage
+    private let diskCacheQueue = DispatchQueue(label: "com.cleanerphone.diskcache", qos: .utility)
+    private let thumbnailCacheURL: URL
+
     private init() {
-        // Configure cache limits
-        thumbnailCache.countLimit = 200 // Max 200 thumbnails in memory
-        thumbnailCache.totalCostLimit = 50 * 1024 * 1024 // 50 MB max
+        // Initialize disk cache directory (thread-safe - done in init before any async access)
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let thumbnailDir = cacheDir.appendingPathComponent("thumbnails", isDirectory: true)
+        try? FileManager.default.createDirectory(at: thumbnailDir, withIntermediateDirectories: true)
+        thumbnailCacheURL = thumbnailDir
+        // Configure memory cache limits
+        thumbnailCache.countLimit = 300 // Max 300 thumbnails in memory
+        thumbnailCache.totalCostLimit = 80 * 1024 * 1024 // 80 MB max
 
         // Configure caching image manager
         imageManager.allowsCachingHighQualityImages = false // Prefer speed
+    }
+
+    // MARK: - Disk Cache Helpers
+
+    private func diskCachePath(for assetId: String, quality: ThumbnailQuality) -> URL {
+        let safeId = assetId.replacingOccurrences(of: "/", with: "_")
+        return thumbnailCacheURL.appendingPathComponent("\(safeId)_\(quality).jpg")
+    }
+
+    private func loadFromDiskCache(assetId: String, quality: ThumbnailQuality) -> UIImage? {
+        let path = diskCachePath(for: assetId, quality: quality)
+        guard FileManager.default.fileExists(atPath: path.path) else { return nil }
+        return UIImage(contentsOfFile: path.path)
+    }
+
+    private func saveToDiskCache(_ image: UIImage, assetId: String, quality: ThumbnailQuality) {
+        diskCacheQueue.async {
+            let path = self.diskCachePath(for: assetId, quality: quality)
+            if let data = image.jpegData(compressionQuality: 0.7) {
+                try? data.write(to: path)
+            }
+        }
+    }
+
+    /// Clear old disk cache entries (keeps cache size manageable)
+    func clearOldDiskCache(maxAgeInDays: Int = 7) {
+        diskCacheQueue.async {
+            guard let files = try? FileManager.default.contentsOfDirectory(at: self.thumbnailCacheURL, includingPropertiesForKeys: [.creationDateKey]) else { return }
+
+            let maxAge = TimeInterval(maxAgeInDays * 24 * 60 * 60)
+            let now = Date()
+
+            for file in files {
+                if let attrs = try? file.resourceValues(forKeys: [.creationDateKey]),
+                   let created = attrs.creationDate,
+                   now.timeIntervalSince(created) > maxAge {
+                    try? FileManager.default.removeItem(at: file)
+                }
+            }
+        }
     }
 
     func requestAuthorization() async -> PHAuthorizationStatus {
@@ -513,7 +564,22 @@ class PhotoLibraryService: ObservableObject {
     // MARK: - Thumbnail loading
 
     func loadThumbnail(for asset: PHAsset, quality: ThumbnailQuality = .detail) async -> UIImage? {
-        await withCheckedContinuation { continuation in
+        let assetId = asset.localIdentifier
+        let cacheKey = "\(assetId)_\(quality)" as NSString
+
+        // 1. Check memory cache first (fastest)
+        if let cached = thumbnailCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        // 2. Check disk cache (fast)
+        if let diskCached = loadFromDiskCache(assetId: assetId, quality: quality) {
+            thumbnailCache.setObject(diskCached, forKey: cacheKey)
+            return diskCached
+        }
+
+        // 3. Load from Photos framework (slowest)
+        let image = await withCheckedContinuation { continuation in
             let options = PHImageRequestOptions()
             options.deliveryMode = .highQualityFormat
             options.resizeMode = .exact
@@ -529,20 +595,29 @@ class PhotoLibraryService: ObservableObject {
                 continuation.resume(returning: image)
             }
         }
+
+        // 4. Cache the result (memory + disk)
+        if let image = image {
+            thumbnailCache.setObject(image, forKey: cacheKey)
+            saveToDiskCache(image, assetId: assetId, quality: quality)
+        }
+
+        return image
     }
 
-    /// Load thumbnails for preview items (first 3 of each category) - in parallel
+    /// Load thumbnails for preview items (first 3 of each category) - PRIORITY loading (no semaphore)
     func loadPreviewThumbnails(for items: [MediaItem]) async -> [MediaItem] {
         guard !items.isEmpty else { return items }
 
         var updatedItems = items
         let previewCount = min(3, items.count)
 
-        // Load all 3 previews in parallel
+        // Load all 3 previews in parallel - NO SEMAPHORE for priority loading
         await withTaskGroup(of: (Int, UIImage?).self) { group in
             for i in 0..<previewCount {
                 group.addTask {
-                    let thumbnail = await self.loadThumbnail(for: items[i].asset, quality: .preview)
+                    // Use priority loading (bypasses semaphore)
+                    let thumbnail = await self.loadThumbnailPriority(for: items[i].asset, quality: .preview)
                     return (i, thumbnail)
                 }
             }
@@ -557,11 +632,54 @@ class PhotoLibraryService: ObservableObject {
         return updatedItems
     }
 
-    /// Load thumbnails for a batch of items (used in detail view) - OPTIMIZED with concurrency limit
+    /// Priority thumbnail loading - bypasses semaphore for immediate loading (use for previews only)
+    private func loadThumbnailPriority(for asset: PHAsset, quality: ThumbnailQuality) async -> UIImage? {
+        let assetId = asset.localIdentifier
+        let cacheKey = "\(assetId)_\(quality)" as NSString
+
+        // 1. Check memory cache first (fastest)
+        if let cached = thumbnailCache.object(forKey: cacheKey) {
+            return cached
+        }
+
+        // 2. Check disk cache (fast)
+        if let diskCached = loadFromDiskCache(assetId: assetId, quality: quality) {
+            thumbnailCache.setObject(diskCached, forKey: cacheKey)
+            return diskCached
+        }
+
+        // 3. Load from Photos framework - NO SEMAPHORE for priority
+        let image = await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .exact
+            options.isSynchronous = false
+            options.isNetworkAccessAllowed = true
+
+            imageManager.requestImage(
+                for: asset,
+                targetSize: quality.size,
+                contentMode: .aspectFill,
+                options: options
+            ) { image, _ in
+                continuation.resume(returning: image)
+            }
+        }
+
+        // 4. Cache the result (memory + disk)
+        if let image = image {
+            thumbnailCache.setObject(image, forKey: cacheKey)
+            saveToDiskCache(image, assetId: assetId, quality: quality)
+        }
+
+        return image
+    }
+
+    /// Load thumbnails for a batch of items (used in detail view) - OPTIMIZED with caching
     func loadThumbnailsBatch(for items: [MediaItem], quality: ThumbnailQuality = .detail) async -> [MediaItem] {
         var updatedItems = items
 
-        // OPTIMIZATION: Load in batches with limited concurrency
+        // OPTIMIZATION: Load in parallel with limited concurrency
         await withTaskGroup(of: (Int, UIImage?).self) { group in
             for (index, item) in items.enumerated() {
                 // Skip if already has thumbnail
@@ -569,25 +687,13 @@ class PhotoLibraryService: ObservableObject {
                     continue
                 }
 
-                // Check cache first
-                let cacheKey = "\(item.id)_\(quality)" as NSString
-                if let cached = thumbnailCache.object(forKey: cacheKey) {
-                    updatedItems[index].thumbnail = cached
-                    continue
-                }
-
                 group.addTask {
-                    // Wait for semaphore before loading
+                    // Wait for semaphore before loading (limits concurrent loads)
                     await self.thumbnailSemaphore.wait()
                     defer { Task { await self.thumbnailSemaphore.signal() } }
 
+                    // loadThumbnail handles all caching (memory + disk)
                     let thumbnail = await self.loadThumbnail(for: item.asset, quality: quality)
-
-                    // Cache the result
-                    if let thumbnail = thumbnail {
-                        self.thumbnailCache.setObject(thumbnail, forKey: cacheKey)
-                    }
-
                     return (index, thumbnail)
                 }
             }
@@ -625,19 +731,12 @@ class PhotoLibraryService: ObservableObject {
                 // Skip if already has thumbnail
                 if item.thumbnail != nil { continue }
 
-                // Check cache
-                let cacheKey = "\(item.id)_\(quality)" as NSString
-                if let cached = thumbnailCache.object(forKey: cacheKey) {
-                    onUpdate(index, cached)
-                    continue
-                }
-
                 group.addTask {
                     await self.thumbnailSemaphore.wait()
                     defer { Task { await self.thumbnailSemaphore.signal() } }
 
+                    // loadThumbnail handles all caching (memory + disk)
                     if let thumbnail = await self.loadThumbnail(for: item.asset, quality: quality) {
-                        self.thumbnailCache.setObject(thumbnail, forKey: cacheKey)
                         await MainActor.run {
                             onUpdate(index, thumbnail)
                         }

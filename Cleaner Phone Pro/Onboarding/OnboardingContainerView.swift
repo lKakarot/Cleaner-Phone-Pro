@@ -113,11 +113,11 @@ struct OnboardingContainerView: View {
                     onContinue: { currentPage = 1 }
                 )
             case 1:
-                DuplicatePhotosPageView(onContinue: { currentPage = 2 })
+                DuplicatePhotosPageView(viewModel: viewModel, onContinue: { currentPage = 2 })
             case 2:
-                OptimizeStoragePageView(storageInfo: storageInfo, onContinue: { currentPage = 3 })
+                OptimizeStoragePageView(viewModel: viewModel, storageInfo: storageInfo, onContinue: { currentPage = 3 })
             case 3:
-                PaywallPageView(storageInfo: storageInfo, onClose: {
+                PaywallPageView(viewModel: viewModel, storageInfo: storageInfo, onClose: {
                     onComplete?()
                 }, onSubscribe: {
                     onComplete?()
@@ -159,6 +159,55 @@ struct OnboardingProgressBar: View {
     }
 }
 
+// MARK: - Onboarding Analysis Progress Bar
+
+struct OnboardingAnalysisBar: View {
+    let progress: Double
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Image(systemName: "sparkle.magnifyingglass")
+                    .foregroundColor(.blue)
+                    .font(.caption)
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text("\(Int(progress * 100))%")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(.blue)
+            }
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(.systemGray5))
+                        .frame(height: 4)
+
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(
+                            LinearGradient(
+                                colors: [.blue, .purple],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: geometry.size.width * progress, height: 4)
+                        .animation(.easeInOut(duration: 0.3), value: progress)
+                }
+            }
+            .frame(height: 4)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(Color(.secondarySystemBackground))
+        .cornerRadius(10)
+    }
+}
+
 // MARK: - Sparkle Icon
 
 struct SparkleIcon: View {
@@ -188,6 +237,7 @@ struct OnboardingBottomLinks: View {
 // MARK: - Page 2: Supprimer les photos en double
 
 struct DuplicatePhotosPageView: View {
+    @ObservedObject var viewModel: CleanerViewModel
     let onContinue: () -> Void
     @Environment(\.colorScheme) private var colorScheme
 
@@ -201,7 +251,17 @@ struct DuplicatePhotosPageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer().frame(height: 20)
+            // Analysis progress bar at top (if analyzing)
+            if viewModel.isAnalyzing {
+                OnboardingAnalysisBar(
+                    progress: viewModel.analysisProgress,
+                    message: viewModel.analysisMessage
+                )
+                .padding(.horizontal, 24)
+                .padding(.top, 12)
+            }
+
+            Spacer().frame(height: viewModel.isAnalyzing ? 12 : 20)
 
             // Progress bar
             OnboardingProgressBar(currentStep: 0)
@@ -419,6 +479,7 @@ struct PhotoCard: View {
 // MARK: - Page 3: Optimiser le stockage
 
 struct OptimizeStoragePageView: View {
+    @ObservedObject var viewModel: CleanerViewModel
     let storageInfo: DeviceStorage
     let onContinue: () -> Void
     @Environment(\.colorScheme) private var colorScheme
@@ -433,7 +494,17 @@ struct OptimizeStoragePageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer().frame(height: 20)
+            // Analysis progress bar at top (if analyzing)
+            if viewModel.isAnalyzing {
+                OnboardingAnalysisBar(
+                    progress: viewModel.analysisProgress,
+                    message: viewModel.analysisMessage
+                )
+                .padding(.horizontal, 24)
+                .padding(.top, 12)
+            }
+
+            Spacer().frame(height: viewModel.isAnalyzing ? 12 : 20)
 
             // Progress bar
             OnboardingProgressBar(currentStep: 1)
@@ -658,6 +729,7 @@ struct LegendItem: View {
 // MARK: - Page 4: Paywall
 
 struct PaywallPageView: View {
+    @ObservedObject var viewModel: CleanerViewModel
     let storageInfo: DeviceStorage
     let onClose: () -> Void
     let onSubscribe: () -> Void
@@ -685,6 +757,16 @@ struct PaywallPageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Analysis progress bar at top (if analyzing)
+            if viewModel.isAnalyzing {
+                OnboardingAnalysisBar(
+                    progress: viewModel.analysisProgress,
+                    message: viewModel.analysisMessage
+                )
+                .padding(.horizontal, 24)
+                .padding(.top, 8)
+            }
+
             // Header
             HStack {
                 Button(action: {}) {
@@ -702,7 +784,7 @@ struct PaywallPageView: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.top, 16)
+            .padding(.top, viewModel.isAnalyzing ? 8 : 16)
 
             Spacer().frame(height: 20)
 

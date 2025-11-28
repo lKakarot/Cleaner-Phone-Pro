@@ -11,6 +11,7 @@ enum MediaCategory: String, CaseIterable, Identifiable {
     case similarVideos = "Vidéos similaires"
     case similarScreenshots = "Captures similaires"
     case screenshots = "Captures d'écran"
+    case allVideos = "Vidéos"
     case largeVideos = "Vidéos volumineuses"
     case others = "Autres"
 
@@ -22,7 +23,8 @@ enum MediaCategory: String, CaseIterable, Identifiable {
         case .similarVideos: return "video.badge.plus"
         case .similarScreenshots: return "rectangle.on.rectangle"
         case .screenshots: return "camera.viewfinder"
-        case .largeVideos: return "film"
+        case .allVideos: return "film"
+        case .largeVideos: return "film.stack"
         case .others: return "photo.stack"
         }
     }
@@ -33,6 +35,7 @@ enum MediaCategory: String, CaseIterable, Identifiable {
         case .similarVideos: return .purple
         case .similarScreenshots: return .green
         case .screenshots: return .orange
+        case .allVideos: return .indigo
         case .largeVideos: return .red
         case .others: return .gray
         }
@@ -40,7 +43,7 @@ enum MediaCategory: String, CaseIterable, Identifiable {
 
     var isVideo: Bool {
         switch self {
-        case .similarVideos, .largeVideos: return true
+        case .similarVideos, .allVideos, .largeVideos: return true
         default: return false
         }
     }

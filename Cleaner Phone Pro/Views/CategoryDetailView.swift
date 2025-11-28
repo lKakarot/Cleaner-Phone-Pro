@@ -13,6 +13,7 @@ struct CategoryDetailView: View {
     @State private var selectedItems: Set<MediaItem> = []
     @State private var isLoadingThumbnails = true
     @State private var showFullAccordion = false
+    @State private var showSwipeMode = false
     @State private var loadedThumbnails: [String: UIImage] = [:] // Local thumbnail storage
     @State private var visibleItemRange: Range<Int> = 0..<20 // Track visible items
     @State private var thumbnailLoadTask: Task<Void, Never>?
@@ -46,11 +47,28 @@ struct CategoryDetailView: View {
         .fullScreenCover(isPresented: $showFullAccordion) {
             ItemsAccordionView(items: currentCategoryData.items, selectedItems: $selectedItems)
         }
+        .fullScreenCover(isPresented: $showSwipeMode) {
+            CategorySwipeModeView(
+                items: currentCategoryData.items,
+                categoryName: categoryData.category.rawValue,
+                viewModel: viewModel
+            )
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 12) {
-                    // View detail button for non-similar categories
+                    // Swipe mode button for non-similar categories
                     if !categoryData.category.hasSimilarGroups && !currentCategoryData.items.isEmpty {
+                        Button(action: { showSwipeMode = true }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "hand.draw")
+                                Text("Trier")
+                            }
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        }
+
+                        // View detail button
                         Button(action: { showFullAccordion = true }) {
                             Image(systemName: "rectangle.stack")
                         }
@@ -220,6 +238,16 @@ struct SimilarGroupView: View {
     @Binding var selectedItems: Set<MediaItem>
     @State private var showAccordion = false
 
+    // Check if all items in this group are selected
+    private var allSelected: Bool {
+        group.items.allSatisfy { selectedItems.contains($0) }
+    }
+
+    // Count of selected items in this group
+    private var selectedCountInGroup: Int {
+        group.items.filter { selectedItems.contains($0) }.count
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Header
@@ -235,21 +263,23 @@ struct SimilarGroupView: View {
 
                 Spacer()
 
+                // Select all button (icon only for compact display)
+                Button(action: { toggleSelectAll() }) {
+                    Image(systemName: allSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 22))
+                        .foregroundColor(allSelected ? .blue : .secondary)
+                }
+                .frame(width: 36, height: 36)
+
                 // View detail button
                 Button(action: { showAccordion = true }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "rectangle.stack")
-                            .font(.caption)
-                        Text("Voir détail")
-                            .font(.caption)
-                    }
-                    .fontWeight(.medium)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.blue.opacity(0.15))
-                    .foregroundColor(.blue)
-                    .cornerRadius(8)
+                    Image(systemName: "rectangle.stack")
+                        .font(.system(size: 18))
+                        .foregroundColor(.primary)
                 }
+                .frame(width: 36, height: 36)
+                .background(Color(.systemGray5))
+                .cornerRadius(8)
             }
 
             // Photos grid
@@ -280,6 +310,20 @@ struct SimilarGroupView: View {
             selectedItems.remove(item)
         } else {
             selectedItems.insert(item)
+        }
+    }
+
+    private func toggleSelectAll() {
+        if allSelected {
+            // Deselect all items in this group
+            for item in group.items {
+                selectedItems.remove(item)
+            }
+        } else {
+            // Select all items in this group
+            for item in group.items {
+                selectedItems.insert(item)
+            }
         }
     }
 }
@@ -351,7 +395,7 @@ struct VerticalAccordionView: View {
 
     var body: some View {
         ZStack {
-            Color.white.ignoresSafeArea()
+            Color(.systemBackground).ignoresSafeArea()
 
             GeometryReader { geometry in
                 ZStack {
@@ -375,7 +419,7 @@ struct VerticalAccordionView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .gesture(
-                    DragGesture()
+                    DragGesture(minimumDistance: 10)
                         .onChanged { value in
                             if !isPlayingVideo {
                                 dragOffset = value.translation.height
@@ -383,12 +427,17 @@ struct VerticalAccordionView: View {
                         }
                         .onEnded { value in
                             if isPlayingVideo { return }
-                            let threshold: CGFloat = 60
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                if value.translation.height > threshold && currentIndex < group.items.count - 1 {
+                            // Use both threshold and velocity for better UX
+                            let threshold: CGFloat = 50
+                            let velocity = value.predictedEndTranslation.height - value.translation.height
+                            let shouldScrollDown = value.translation.height > threshold || velocity > 200
+                            let shouldScrollUp = value.translation.height < -threshold || velocity < -200
+
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                if shouldScrollDown && currentIndex < group.items.count - 1 {
                                     currentIndex += 1
                                     stopVideo()
-                                } else if value.translation.height < -threshold && currentIndex > 0 {
+                                } else if shouldScrollUp && currentIndex > 0 {
                                     currentIndex -= 1
                                     stopVideo()
                                 }
@@ -560,26 +609,36 @@ struct VerticalAccordionView: View {
     private func startHDPreloading() {
         hdLoadTask?.cancel()
         hdLoadTask = Task {
-            // Only preload current and immediate neighbors (3 images max)
-            let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex - 1]
+            // Preload current and next 2 items (3 total)
+            let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex + 2]
                 .filter { $0 >= 0 && $0 < group.items.count }
 
             for index in indicesToLoad {
                 let item = group.items[index]
 
-                // Skip if already loaded or if it's a video
-                if localHDImages[item.id] != nil || hdCache.get(item.id) != nil || item.asset.mediaType == .video {
+                // Skip if already loaded
+                if localHDImages[item.id] != nil || hdCache.get(item.id) != nil {
                     continue
                 }
 
                 // Check if task was cancelled
                 if Task.isCancelled { break }
 
-                // Load HD image with priority for current index
-                if let hdImage = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
-                    if !Task.isCancelled {
-                        localHDImages[item.id] = hdImage
-                        hdCache.set(hdImage, for: item.id)
+                if item.asset.mediaType == .video {
+                    // For videos: load high-quality thumbnail (.swipe quality = 900x900)
+                    if let thumbnail = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .swipe) {
+                        if !Task.isCancelled {
+                            localHDImages[item.id] = thumbnail
+                            hdCache.set(thumbnail, for: item.id)
+                        }
+                    }
+                } else {
+                    // For photos: load full HD image
+                    if let hdImage = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
+                        if !Task.isCancelled {
+                            localHDImages[item.id] = hdImage
+                            hdCache.set(hdImage, for: item.id)
+                        }
                     }
                 }
             }
@@ -652,7 +711,7 @@ struct ItemsAccordionView: View {
 
     var body: some View {
         ZStack {
-            Color.white.ignoresSafeArea()
+            Color(.systemBackground).ignoresSafeArea()
 
             GeometryReader { geometry in
                 ZStack {
@@ -676,7 +735,7 @@ struct ItemsAccordionView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .gesture(
-                    DragGesture()
+                    DragGesture(minimumDistance: 10)
                         .onChanged { value in
                             if !isPlayingVideo {
                                 dragOffset = value.translation.height
@@ -684,12 +743,17 @@ struct ItemsAccordionView: View {
                         }
                         .onEnded { value in
                             if isPlayingVideo { return }
-                            let threshold: CGFloat = 60
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                if value.translation.height > threshold && currentIndex < items.count - 1 {
+                            // Use both threshold and velocity for better UX
+                            let threshold: CGFloat = 50
+                            let velocity = value.predictedEndTranslation.height - value.translation.height
+                            let shouldScrollDown = value.translation.height > threshold || velocity > 200
+                            let shouldScrollUp = value.translation.height < -threshold || velocity < -200
+
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                if shouldScrollDown && currentIndex < items.count - 1 {
                                     currentIndex += 1
                                     stopVideo()
-                                } else if value.translation.height < -threshold && currentIndex > 0 {
+                                } else if shouldScrollUp && currentIndex > 0 {
                                     currentIndex -= 1
                                     stopVideo()
                                 }
@@ -856,31 +920,41 @@ struct ItemsAccordionView: View {
         }
     }
 
-    // MARK: - HD Preloading (Optimized)
+    // MARK: - HD Preloading (Optimized for both photos and videos)
 
     private func startHDPreloading() {
         hdLoadTask?.cancel()
         hdLoadTask = Task {
-            // Only preload current and immediate neighbors (3 images max)
-            let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex - 1]
+            // Preload current and next 2 items (3 total)
+            let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex + 2]
                 .filter { $0 >= 0 && $0 < items.count }
 
             for index in indicesToLoad {
                 let item = items[index]
 
-                // Skip if already loaded or if it's a video
-                if localHDImages[item.id] != nil || hdCache.get(item.id) != nil || item.asset.mediaType == .video {
+                // Skip if already loaded
+                if localHDImages[item.id] != nil || hdCache.get(item.id) != nil {
                     continue
                 }
 
                 // Check if task was cancelled
                 if Task.isCancelled { break }
 
-                // Load HD image
-                if let hdImage = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
-                    if !Task.isCancelled {
-                        localHDImages[item.id] = hdImage
-                        hdCache.set(hdImage, for: item.id)
+                if item.asset.mediaType == .video {
+                    // For videos: load high-quality thumbnail (.swipe quality = 900x900)
+                    if let thumbnail = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .swipe) {
+                        if !Task.isCancelled {
+                            localHDImages[item.id] = thumbnail
+                            hdCache.set(thumbnail, for: item.id)
+                        }
+                    }
+                } else {
+                    // For photos: load full HD image
+                    if let hdImage = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
+                        if !Task.isCancelled {
+                            localHDImages[item.id] = hdImage
+                            hdCache.set(hdImage, for: item.id)
+                        }
                     }
                 }
             }
@@ -991,23 +1065,26 @@ struct VerticalAccordionCard: View {
                     VideoPlayer(player: player)
                         .frame(width: screenSize.width - 24, height: screenSize.height * 0.80)
                 } else {
+                    // Background for letterboxing
+                    Color(.systemGray6)
+                        .frame(width: screenSize.width - 24, height: screenSize.height * 0.80)
+
                     Group {
                         if let image = highQualityImage {
                             Image(uiImage: image)
                                 .resizable()
-                                .aspectRatio(contentMode: .fill)
+                                .aspectRatio(contentMode: .fit)
                         } else if let thumbnail = item.thumbnail {
                             Image(uiImage: thumbnail)
                                 .resizable()
-                                .aspectRatio(contentMode: .fill)
+                                .aspectRatio(contentMode: .fit)
                         } else {
                             Rectangle()
                                 .fill(Color(.systemGray4))
                                 .overlay(ProgressView())
                         }
                     }
-                    .frame(width: screenSize.width - 24, height: screenSize.height * 0.80)
-                    .clipped()
+                    .frame(maxWidth: screenSize.width - 24, maxHeight: screenSize.height * 0.80)
 
                     // Video badge (only when not playing)
                     if isVideo && relativeIndex == 0 {
@@ -1030,7 +1107,7 @@ struct VerticalAccordionCard: View {
             .padding(8)
             .background(
                 RoundedRectangle(cornerRadius: 20)
-                    .fill(Color.white)
+                    .fill(Color(.systemBackground))
                     .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
             )
             .overlay(
@@ -1299,22 +1376,661 @@ struct SelectablePhotoCell: View {
 }
 
 struct DeletingOverlay: View {
+    @State private var isAnimating = false
+
     var body: some View {
         ZStack {
-            Color.black.opacity(0.3)
+            // Fond semi-transparent avec blur
+            Color.black.opacity(0.4)
                 .ignoresSafeArea()
 
-            VStack(spacing: 16) {
-                ProgressView()
-                    .scaleEffect(1.5)
+            // Card centrale
+            VStack(spacing: 20) {
+                // Icône animée
+                ZStack {
+                    // Cercle extérieur qui pulse
+                    Circle()
+                        .stroke(
+                            LinearGradient(
+                                colors: [.red.opacity(0.3), .orange.opacity(0.3)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 4
+                        )
+                        .frame(width: 80, height: 80)
+                        .scaleEffect(isAnimating ? 1.2 : 1.0)
+                        .opacity(isAnimating ? 0.3 : 0.8)
 
-                Text("Suppression en cours...")
-                    .font(.headline)
-                    .foregroundColor(.white)
+                    // Cercle qui tourne
+                    Circle()
+                        .trim(from: 0, to: 0.7)
+                        .stroke(
+                            LinearGradient(
+                                colors: [.red, .orange],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            style: StrokeStyle(lineWidth: 4, lineCap: .round)
+                        )
+                        .frame(width: 60, height: 60)
+                        .rotationEffect(.degrees(isAnimating ? 360 : 0))
+
+                    // Icône centrale
+                    Image(systemName: "trash.fill")
+                        .font(.system(size: 24))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.red, .orange],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                }
+
+                VStack(spacing: 8) {
+                    Text("Suppression en cours")
+                        .font(.headline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(Color(.label))
+
+                    Text("Veuillez patienter...")
+                        .font(.subheadline)
+                        .foregroundColor(Color(.secondaryLabel))
+                }
             }
-            .padding(30)
-            .background(Color(.systemGray6))
-            .cornerRadius(16)
+            .padding(32)
+            .background(
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(Color(.systemBackground))
+                    .shadow(color: .black.opacity(0.2), radius: 20, y: 10)
+            )
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
+                isAnimating = true
+            }
+        }
+    }
+}
+
+// MARK: - Category Swipe Mode View
+
+struct CategorySwipeModeView: View {
+    let items: [MediaItem]
+    let categoryName: String
+    @ObservedObject var viewModel: CleanerViewModel
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var currentIndex = 0
+    @State private var offset: CGSize = .zero
+    @State private var toKeep: [MediaItem] = []
+    @State private var toDelete: [MediaItem] = []
+    @State private var hdImage: UIImage?
+    @State private var loadedThumbnails: [String: UIImage] = [:]
+    @State private var hdLoadTask: Task<Void, Never>?
+    @State private var showResults = false
+
+    var body: some View {
+        ZStack {
+            Color(.systemGroupedBackground).ignoresSafeArea()
+
+            if showResults {
+                CategorySwipeResultsView(
+                    categoryName: categoryName,
+                    toKeep: toKeep,
+                    toDelete: toDelete,
+                    onDeleteConfirmed: deleteSelectedItems,
+                    onReset: resetSwipe,
+                    onDismiss: { dismiss() }
+                )
+            } else if currentIndex >= items.count {
+                // All done
+                VStack(spacing: 20) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 60))
+                        .foregroundColor(.green)
+                    Text("Tri terminé !")
+                        .font(.title2)
+                        .fontWeight(.bold)
+
+                    Button(action: { showResults = true }) {
+                        Text("Voir le résumé")
+                            .fontWeight(.semibold)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 30)
+                            .padding(.vertical, 14)
+                            .background(Color.blue)
+                            .cornerRadius(25)
+                    }
+                }
+            } else {
+                VStack(spacing: 0) {
+                    // Header
+                    HStack {
+                        Button(action: { dismiss() }) {
+                            Image(systemName: "xmark")
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.primary)
+                                .padding(10)
+                                .background(Color(.systemGray5))
+                                .clipShape(Circle())
+                        }
+
+                        Spacer()
+
+                        VStack(spacing: 2) {
+                            Text(categoryName)
+                                .font(.headline)
+                            Text("\(currentIndex + 1) / \(items.count)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        Button(action: { showResults = true }) {
+                            Text("Terminer")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.blue)
+                                .cornerRadius(20)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
+                    // Stats
+                    HStack(spacing: 30) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "trash")
+                            Text("\(toDelete.count)")
+                        }
+                        .foregroundColor(.red)
+
+                        HStack(spacing: 4) {
+                            Image(systemName: "heart.fill")
+                            Text("\(toKeep.count)")
+                        }
+                        .foregroundColor(.green)
+                    }
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .padding(.top, 8)
+
+                    Spacer()
+
+                    // Card
+                    ZStack {
+                        // Background cards - reversed so next card is on top
+                        ForEach((0..<min(2, items.count - currentIndex - 1)).reversed(), id: \.self) { i in
+                            let index = currentIndex + i + 1
+                            if index < items.count {
+                                CategorySwipeCardBackground(
+                                    item: items[index],
+                                    thumbnail: getThumbnail(for: items[index]),
+                                    offset: CGFloat(i)
+                                )
+                            }
+                        }
+
+                        // Current card
+                        CategorySwipeCard(
+                            item: items[currentIndex],
+                            thumbnail: getThumbnail(for: items[currentIndex]),
+                            hdImage: hdImage,
+                            offset: offset
+                        )
+                        .offset(offset)
+                        .rotationEffect(.degrees(Double(offset.width / 20)))
+                        .gesture(
+                            DragGesture()
+                                .onChanged { gesture in
+                                    offset = gesture.translation
+                                }
+                                .onEnded { gesture in
+                                    handleGestureEnd(gesture)
+                                }
+                        )
+                    }
+                    .padding()
+
+                    Spacer()
+
+                    // Action buttons
+                    HStack(spacing: 30) {
+                        Button(action: { swipeLeft() }) {
+                            Image(systemName: "xmark")
+                                .font(.title)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                                .frame(width: 65, height: 65)
+                                .background(Color.red)
+                                .clipShape(Circle())
+                        }
+
+                        Button(action: { undoSwipe() }) {
+                            Image(systemName: "arrow.uturn.backward")
+                                .font(.title2)
+                                .foregroundColor(.orange)
+                                .frame(width: 50, height: 50)
+                                .background(Color(.systemBackground))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.1), radius: 5, y: 2)
+                        }
+                        .disabled(currentIndex == 0 && toKeep.isEmpty && toDelete.isEmpty)
+                        .opacity(currentIndex == 0 && toKeep.isEmpty && toDelete.isEmpty ? 0.4 : 1)
+
+                        Button(action: { swipeRight() }) {
+                            Image(systemName: "heart.fill")
+                                .font(.title)
+                                .foregroundColor(.white)
+                                .frame(width: 65, height: 65)
+                                .background(Color.green)
+                                .clipShape(Circle())
+                        }
+                    }
+                    .padding(.bottom, 30)
+
+                    // Instructions
+                    HStack(spacing: 30) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.left")
+                            Text("Supprimer")
+                        }
+                        .foregroundColor(.red)
+
+                        HStack(spacing: 4) {
+                            Text("Garder")
+                            Image(systemName: "arrow.right")
+                        }
+                        .foregroundColor(.green)
+                    }
+                    .font(.caption)
+                    .padding(.bottom, 10)
+                }
+            }
+        }
+        .onAppear {
+            loadVisibleItems()
+        }
+        .onChange(of: currentIndex) { _ in
+            loadVisibleItems()
+        }
+        .onDisappear {
+            hdLoadTask?.cancel()
+        }
+    }
+
+    private func getThumbnail(for item: MediaItem) -> UIImage? {
+        return item.thumbnail ?? loadedThumbnails[item.id]
+    }
+
+    private func loadVisibleItems() {
+        hdImage = nil
+
+        // Keep some thumbnails in cache
+        if !items.isEmpty && currentIndex < items.count {
+            let validEnd = min(items.count - 1, currentIndex + 3)
+            let validStart = max(0, currentIndex - 1)
+            if validStart <= validEnd {
+                let indicesToKeep = Set((validStart...validEnd).map { items[$0].id })
+                loadedThumbnails = loadedThumbnails.filter { indicesToKeep.contains($0.key) }
+            }
+        }
+
+        let indicesToLoad = [currentIndex, currentIndex + 1, currentIndex + 2]
+            .filter { $0 >= 0 && $0 < items.count }
+
+        for index in indicesToLoad {
+            let item = items[index]
+            if item.thumbnail == nil && loadedThumbnails[item.id] == nil {
+                Task {
+                    if let thumb = await PhotoLibraryService.shared.loadThumbnail(for: item.asset, quality: .swipe) {
+                        await MainActor.run {
+                            loadedThumbnails[item.id] = thumb
+                        }
+                    }
+                }
+            }
+        }
+
+        loadHDForCurrentItem()
+    }
+
+    private func loadHDForCurrentItem() {
+        hdLoadTask?.cancel()
+        guard currentIndex < items.count else { return }
+        let item = items[currentIndex]
+        guard item.asset.mediaType == .image else {
+            hdImage = nil
+            return
+        }
+
+        hdLoadTask = Task {
+            if let image = await PhotoLibraryService.shared.loadFullImage(for: item.asset) {
+                if !Task.isCancelled {
+                    await MainActor.run {
+                        hdImage = image
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleGestureEnd(_ gesture: DragGesture.Value) {
+        let threshold: CGFloat = 100
+        if gesture.translation.width < -threshold {
+            swipeLeft()
+        } else if gesture.translation.width > threshold {
+            swipeRight()
+        } else {
+            withAnimation(.spring()) {
+                offset = .zero
+            }
+        }
+    }
+
+    private func swipeLeft() {
+        let item = items[currentIndex]
+        withAnimation(.spring()) {
+            offset = CGSize(width: -500, height: 0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            toDelete.append(item)
+            currentIndex += 1
+            offset = .zero
+        }
+    }
+
+    private func swipeRight() {
+        let item = items[currentIndex]
+        withAnimation(.spring()) {
+            offset = CGSize(width: 500, height: 0)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            toKeep.append(item)
+            currentIndex += 1
+            offset = .zero
+        }
+    }
+
+    private func undoSwipe() {
+        guard currentIndex > 0 || !toKeep.isEmpty || !toDelete.isEmpty else { return }
+        if currentIndex > 0 {
+            currentIndex -= 1
+        }
+        if let last = toKeep.last, last.id == items[currentIndex].id {
+            toKeep.removeLast()
+        } else if let last = toDelete.last, last.id == items[currentIndex].id {
+            toDelete.removeLast()
+        }
+    }
+
+    private func resetSwipe() {
+        currentIndex = 0
+        toKeep = []
+        toDelete = []
+        hdImage = nil
+        showResults = false
+    }
+
+    private func deleteSelectedItems() {
+        Task {
+            let _ = await viewModel.deleteItems(toDelete)
+            await MainActor.run {
+                dismiss()
+            }
+        }
+    }
+}
+
+// MARK: - Category Swipe Card
+
+struct CategorySwipeCard: View {
+    let item: MediaItem
+    let thumbnail: UIImage?
+    let hdImage: UIImage?
+    let offset: CGSize
+
+    private var isVideo: Bool {
+        item.asset.mediaType == .video
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color(.systemGray6)
+
+                if let image = hdImage ?? thumbnail {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: geo.size.width, maxHeight: geo.size.height)
+                } else {
+                    ProgressView()
+                }
+
+                // Video badge
+                if isVideo {
+                    VStack {
+                        HStack {
+                            HStack(spacing: 4) {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 12))
+                                Text(formatDuration(item.asset.duration))
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.black.opacity(0.7))
+                            .cornerRadius(8)
+                            .padding(12)
+                            Spacer()
+                        }
+                        Spacer()
+                    }
+                }
+
+                // Swipe indicators
+                VStack {
+                    Spacer()
+                    HStack {
+                        if offset.width < -20 {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 80))
+                                .foregroundColor(.red)
+                                .opacity(min(1, Double(-offset.width) / 100))
+                        }
+                        Spacer()
+                        if offset.width > 20 {
+                            Image(systemName: "heart.circle.fill")
+                                .font(.system(size: 80))
+                                .foregroundColor(.green)
+                                .opacity(min(1, Double(offset.width) / 100))
+                        }
+                    }
+                    .padding(.horizontal, 40)
+                    Spacer()
+                }
+
+                // File info
+                VStack {
+                    Spacer()
+                    HStack {
+                        Text(ByteCountFormatter.string(fromByteCount: item.fileSize, countStyle: .file))
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Spacer()
+                        if let date = item.asset.creationDate {
+                            Text(date, style: .date)
+                                .font(.caption)
+                        }
+                    }
+                    .foregroundColor(.white)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: [.clear, .black.opacity(0.7)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 20))
+            .shadow(color: .black.opacity(0.2), radius: 10, y: 5)
+        }
+        .aspectRatio(0.7, contentMode: .fit)
+    }
+
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        let minutes = Int(duration) / 60
+        let seconds = Int(duration) % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - Category Swipe Card Background
+
+struct CategorySwipeCardBackground: View {
+    let item: MediaItem
+    let thumbnail: UIImage?
+    let offset: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color(.systemGray6)
+                if let thumbnail = thumbnail {
+                    Image(uiImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: geo.size.width, maxHeight: geo.size.height)
+                } else {
+                    ProgressView().scaleEffect(0.8)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 20))
+            .scaleEffect(1 - (offset + 1) * 0.05)
+            .offset(y: (offset + 1) * 10)
+            .opacity(0.7 - offset * 0.2)
+        }
+        .aspectRatio(0.7, contentMode: .fit)
+    }
+}
+
+// MARK: - Category Swipe Results View
+
+struct CategorySwipeResultsView: View {
+    let categoryName: String
+    let toKeep: [MediaItem]
+    let toDelete: [MediaItem]
+    let onDeleteConfirmed: () -> Void
+    let onReset: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 24) {
+            // Header
+            HStack {
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.title3)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.primary)
+                        .padding(10)
+                        .background(Color(.systemGray5))
+                        .clipShape(Circle())
+                }
+                Spacer()
+                Text("Résumé")
+                    .font(.headline)
+                Spacer()
+                Color.clear.frame(width: 44, height: 44)
+            }
+            .padding(.horizontal)
+
+            // Stats
+            HStack(spacing: 40) {
+                VStack(spacing: 8) {
+                    Image(systemName: "heart.fill")
+                        .font(.title)
+                        .foregroundColor(.green)
+                    Text("\(toKeep.count)")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                    Text("À garder")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                VStack(spacing: 8) {
+                    Image(systemName: "trash.fill")
+                        .font(.title)
+                        .foregroundColor(.red)
+                    Text("\(toDelete.count)")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                    Text("À supprimer")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.vertical)
+
+            // Space to free
+            if !toDelete.isEmpty {
+                let totalSize = toDelete.reduce(0) { $0 + $1.fileSize }
+                Text("Espace à libérer: \(ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file))")
+                    .font(.headline)
+                    .foregroundColor(.green)
+            }
+
+            Spacer()
+
+            // Buttons
+            VStack(spacing: 12) {
+                if !toDelete.isEmpty {
+                    Button(action: onDeleteConfirmed) {
+                        HStack {
+                            Image(systemName: "trash.fill")
+                            Text("Supprimer \(toDelete.count) éléments")
+                        }
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.red)
+                        .cornerRadius(14)
+                    }
+                }
+
+                Button(action: onReset) {
+                    Text("Recommencer")
+                        .font(.headline)
+                        .foregroundColor(.blue)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.blue.opacity(0.15))
+                        .cornerRadius(14)
+                }
+
+                Button(action: onDismiss) {
+                    Text("Fermer")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                }
+            }
+            .padding(.horizontal)
+            .padding(.bottom)
         }
     }
 }
