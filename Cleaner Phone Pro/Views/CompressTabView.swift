@@ -14,7 +14,6 @@ struct CompressTabView: View {
     @State private var selectedItem: MediaItem?
     @State private var selectedItems: Set<String> = []
     @State private var isSelectionMode = false
-    @State private var showCompressionSheet = false
     @State private var showBatchCompressionSheet = false
     @State private var selectedTab = 0
     @State private var loadedThumbnails: [String: UIImage] = [:]
@@ -50,11 +49,15 @@ struct CompressTabView: View {
         GridItem(.flexible(), spacing: 2)
     ]
 
+    private var hasAnyItems: Bool {
+        !allPhotos.isEmpty || !allVideos.isEmpty
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if viewModel.isAnalyzing {
-                    // Loading state
+                if viewModel.isAnalyzing && !hasAnyItems {
+                    // Loading state - only show if we have no data yet
                     Spacer()
                     VStack(spacing: 16) {
                         ProgressView()
@@ -137,7 +140,6 @@ struct CompressTabView: View {
                                             toggleSelection(item)
                                         } else {
                                             selectedItem = item
-                                            showCompressionSheet = true
                                         }
                                     },
                                     onAppear: { loadThumbnailIfNeeded(for: item) }
@@ -206,15 +208,17 @@ struct CompressTabView: View {
             .background(Color(.systemGroupedBackground))
             .toolbar(.hidden, for: .navigationBar)
         }
-        .sheet(isPresented: $showCompressionSheet, onDismiss: {
-            Task { await refreshData() }
-        }) {
-            if let item = selectedItem {
-                CompressionFlowView(item: item, viewModel: viewModel)
-            }
+        .sheet(item: $selectedItem, onDismiss: {
+            // Light refresh - just invalidate cache, data will reload on next app launch
+            CacheService.shared.clearCache()
+            refreshTrigger += 1
+        }) { item in
+            CompressionFlowView(item: item, viewModel: viewModel)
         }
         .sheet(isPresented: $showBatchCompressionSheet, onDismiss: {
-            Task { await refreshData() }
+            // Light refresh - just invalidate cache
+            CacheService.shared.clearCache()
+            refreshTrigger += 1
             isSelectionMode = false
             selectedItems.removeAll()
         }) {
@@ -250,12 +254,6 @@ struct CompressTabView: View {
                 }
             }
         }
-    }
-
-    private func refreshData() async {
-        CacheService.shared.clearCache()
-        await viewModel.loadAllCategories()
-        refreshTrigger += 1
     }
 }
 
